@@ -4,13 +4,12 @@ import { useState, useEffect } from 'react'
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Home, Upload, Package, MessageCircle, User, Moon, Sun, Globe } from 'lucide-react'
+import { Upload, Package, MessageCircle, User, Moon, Sun, Globe } from 'lucide-react'
 
 const navItems = [
-  { href: '/home', label: 'Home', icon: Home },
+  { href: '/assistant', label: 'AI', icon: MessageCircle },
   { href: '/upload', label: 'Upload', icon: Upload },
   { href: '/orders', label: 'Orders', icon: Package },
-  { href: '/assistant', label: 'AI', icon: MessageCircle },
   { href: '/profile', label: 'Profile', icon: User },
 ]
 
@@ -55,7 +54,7 @@ export default function CustomerLayout({ children }: { children: React.ReactNode
       {/* Top Bar */}
       <header className="fixed top-0 left-0 right-0 z-50 bg-white/80 dark:bg-gray-900/80 backdrop-blur-lg border-b border-gray-200 dark:border-gray-800">
         <div className="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between">
-          <Link href="/home" className="flex items-center gap-2">
+          <Link href="/assistant" className="flex items-center gap-2">
             <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-teal-500 to-emerald-600 flex items-center justify-center text-white font-bold text-lg shadow-lg shadow-teal-500/30">
               P
             </div>
