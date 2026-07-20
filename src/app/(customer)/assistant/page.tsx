@@ -81,22 +81,15 @@ export default function AssistantPage() {
       setLang(savedLang);
     }
 
-    // Persist chat history restore
-    const savedChat = localStorage.getItem('prime_chat_history');
-    if (savedChat) {
-      try {
-        setChatHistory(JSON.parse(savedChat));
-      } catch (e) {
-        console.error('Error loading chat history:', e);
-      }
-    } else {
-      // Seed initial welcoming message if empty
-      clearChatHistory();
-      addChatMessage({
-        sender: 'assistant',
-        text: t('assistantGreeting'),
-      });
-    }
+    // Always start a fresh session — never load old chat
+    clearChatHistory();
+    localStorage.removeItem('prime_chat_history');
+    addChatMessage({
+      id: 'msg-welcome-' + Date.now(),
+      sender: 'assistant',
+      text: t('assistantGreeting'),
+      timestamp: new Date().toISOString(),
+    });
   }, []);
 
   // Sync Lang
@@ -105,12 +98,7 @@ export default function AssistantPage() {
     localStorage.setItem('prime_lang', newLang);
   };
 
-  // Sync chat persistence on changes
-  useEffect(() => {
-    if (chatHistory.length > 0) {
-      localStorage.setItem('prime_chat_history', JSON.stringify(chatHistory));
-    }
-  }, [chatHistory]);
+  // No chat persistence between sessions — each visit starts fresh
 
   // Scroll to bottom
   useEffect(() => {
@@ -363,7 +351,9 @@ export default function AssistantPage() {
   const handleCancelOrder = () => {
     clearCart();
     addChatMessage({
+      id: 'msg-' + Date.now(),
       sender: 'assistant',
+      timestamp: new Date().toISOString(),
       text: lang === 'ar' 
         ? 'تم إلغاء الطلب بنجاح. هل يمكنني مساعدتك في أي شيء آخر؟' 
         : lang === 'ur'

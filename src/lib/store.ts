@@ -3,9 +3,13 @@ import { Medicine, Order, Customer, Supplier, OrderItem } from '../types';
 
 export interface ChatMessage {
   id: string;
-  role: 'user' | 'ai';
+  sender: 'user' | 'assistant';
   text: string;
-  time: string;
+  timestamp: string;
+  type?: 'prescription_upload' | 'order_summary' | 'order_success' | 'medicine_list';
+  orderId?: string;
+  orderNumber?: string;
+  extractedMedicines?: any[];
 }
 
 export interface CartItem {
@@ -110,9 +114,19 @@ export const useCustomerStore = create<CustomerStore>((set) => ({
   }),
   removeFromCart: (medicineId) => set((state) => ({ cart: state.cart.filter(c => c.medicineId !== medicineId) })),
   clearCart: () => set({ cart: [] }),
-  addChatMessage: (msg) => set((state) => ({ chatHistory: [...state.chatHistory, msg] })),
+  addChatMessage: (msg) => set((state) => ({
+    chatHistory: [...state.chatHistory, {
+      ...msg,
+      id: msg.id || ('msg-' + Date.now() + '-' + Math.random().toString(36).substr(2, 5)),
+      timestamp: msg.timestamp || new Date().toISOString(),
+    }]
+  })),
   setChatHistory: (msgs) => set({ chatHistory: msgs }),
-  clearChatHistory: () => set({ chatHistory: [] }),
+  clearChatHistory: () => set({
+    chatHistory: [],
+    cart: [],
+    customer: null,
+  }),
   createOrder: (order) => set((state) => ({
     orders: [order, ...state.orders],
     cart: [],

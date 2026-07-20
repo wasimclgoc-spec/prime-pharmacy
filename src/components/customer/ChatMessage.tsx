@@ -26,9 +26,11 @@ export default function ChatMessage({
   const isAssistant = message.sender === 'assistant';
 
   // Format date helper
-  const formatTime = (isoString: string) => {
+  const formatTime = (isoString: string | undefined) => {
     try {
+      if (!isoString) return '';
       const date = new Date(isoString);
+      if (isNaN(date.getTime())) return '';
       return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     } catch {
       return '';
