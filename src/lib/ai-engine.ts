@@ -181,17 +181,40 @@ export async function getAIResponse(
   const lastUserMessage = userMessages[userMessages.length - 1];
   const lastText = lastUserMessage?.text || '';
 
+  // ── Detect greeting → reset customer and start fresh ──────────────────────
+  const greetingPattern = /^(hi|hello|hey|salam|salaam|مرحبا|سلام|ہیلو|start|مرحباً|assalam|good morning|good evening|good afternoon|السلام)[\s!.]*$/i;
+  const isGreeting = greetingPattern.test(lastText.trim());
+
+  if (isGreeting) {
+    // Full reset for new customer session
+    store.setCustomer(null);
+    store.clearCart();
+  }
+
   // ── Check if customer is typing a medicine name (e.g. "Panadol 500mg") ──
   const medResults = searchMedicineByName(lastText, medicines);
   const isMedicineSearch = medResults.length > 0 && !isPersonalInfo(lastText);
 
-  // ── SMART INFO EXTRACTION from ALL user messages combined ─────────────────
-  const allUserText = userMessages.map(m => m.text).join(' ');
+  // ── SMART INFO EXTRACTION — only from messages AFTER the last greeting ─────
+  // Find the index of the last greeting message to avoid picking up old session data
+  const lastGreetingIdx = userMessages.map((m, i) => ({ m, i }))
+    .filter(({ m }) => greetingPattern.test(m.text.trim()))
+    .pop()?.i ?? -1;
+
+  const relevantUserMessages = lastGreetingIdx >= 0
+    ? userMessages.slice(lastGreetingIdx + 1)
+    : userMessages;
+
+  const allUserText = relevantUserMessages.map(m => m.text).join(' ');
   const extracted = parseCustomerInfoFromText(allUserText);
-  const merged = mergeCustomerInfo(store.customer, extracted);
+  const merged = isGreeting
+    ? { name: '', phone: '', address: '' }
+    : mergeCustomerInfo(store.customer, extracted);
 
   // Save merged customer to store always (partial OK)
-  store.setCustomer(merged);
+  if (!isGreeting) {
+    store.setCustomer(merged);
+  }
 
   // ── Check if we have all info ─────────────────────────────────────────────
   const hasName = merged.name.trim().length > 0;
@@ -201,6 +224,21 @@ export async function getAIResponse(
 
   // ── Check if a prescription has been uploaded ──────────────────────────────
   const hasPrescription = chatHistory.some(m => m.type === 'order_summary' || m.text?.includes('📋'));
+
+  // ── If greeting, return fresh welcome immediately ───────────────────────
+  if (isGreeting) {
+    const welcomeText = lang === 'ar'
+      ? '👋 مرحباً! أنا مساعد Prime Pharmacy. كيف يمكنني مساعدتك اليوم؟ يمكنك البحث عن دواء أو تحميل وصفتك الطبية.'
+      : lang === 'ur'
+      ? '👋 سلام! میں Prime Pharmacy کا AI اسسٹنٹ ہوں۔ آج میں آپ کی کیا مدد کر سکتا ہوں؟ دوا تلاش کریں یا نسخہ اپ لوڈ کریں۔'
+      : '👋 Hello! I am Prime Pharmacy AI Assistant. How can I help you today? You can search for a medicine or upload your prescription.';
+    return {
+      id: 'msg-' + Math.random().toString(36).substr(2, 9),
+      sender: 'assistant',
+      text: welcomeText,
+      timestamp: new Date().toISOString(),
+    };
+  }
 
   // ── If customer is searching for a medicine by name ──────────────────────
   if (isMedicineSearch) {
