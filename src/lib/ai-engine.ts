@@ -53,11 +53,79 @@ function mergeCustomerInfo(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// MEDICINE SEARCH — fetch medicine by name + strength (e.g. "Panadol 500mg")
+// ─────────────────────────────────────────────────────────────────────────────
+export function searchMedicineByName(query: string, inventory: Medicine[]): Medicine[] {
+  const cleanQuery = query.toLowerCase().trim();
+  if (!cleanQuery) return [];
+
+  // Extract medicine name and strength from query (e.g. "panadol 500mg" → name="panadol", strength="500mg")
+  const strengthMatch = cleanQuery.match(/(\d+)\s*(mg|g|ml|mcg|%)?/);
+  const strength = strengthMatch ? strengthMatch[0] : '';
+  const nameOnly = cleanQuery.replace(strength, '').trim();
+
+  const results: { med: Medicine; score: number }[] = [];
+
+  for (const med of inventory) {
+    const medName = med.name.toLowerCase();
+    const medGeneric = med.generic.toLowerCase();
+    const medBrand = med.brand.toLowerCase();
+    const medStrength = (med.strength || '').toString().toLowerCase();
+
+    let score = 0;
+
+    // Exact name match
+    if (medName === nameOnly || medGeneric === nameOnly || medBrand === nameOnly) {
+      score = 100;
+    }
+    // Name contains query
+    else if (medName.includes(nameOnly) || medGeneric.includes(nameOnly) || medBrand.includes(nameOnly)) {
+      score = 80;
+    }
+    // Query contains name
+    else if (nameOnly.includes(medName) || nameOnly.includes(medGeneric) || nameOnly.includes(medBrand)) {
+      score = 70;
+    }
+    // Partial word match
+    else {
+      const queryWords = nameOnly.split(/\s+/);
+      const medWords = [medName, medGeneric, medBrand].join(' ').split(/\s+/);
+      let matchedWords = 0;
+      for (const qw of queryWords) {
+        if (qw.length < 3) continue;
+        for (const mw of medWords) {
+          if (mw.includes(qw) || qw.includes(mw)) {
+            matchedWords++;
+            break;
+          }
+        }
+      }
+      if (matchedWords > 0) {
+        score = 40 + matchedWords * 10;
+      }
+    }
+
+    // Bonus: strength matches
+    if (strength && medStrength && medStrength.includes(strength)) {
+      score += 15;
+    }
+
+    if (score > 0) {
+      results.push({ med, score });
+    }
+  }
+
+  // Sort by score descending, return top 5
+  results.sort((a, b) => b.score - a.score);
+  return results.slice(0, 5).map(r => r.med);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // SYSTEM PROMPT
 // ─────────────────────────────────────────────────────────────────────────────
 const getSystemPrompt = (medicines: Medicine[], lang: 'en' | 'ar' | 'ur') => {
   const medicineListStr = medicines
-    .map(m => `- ${m.name}: Price PKR ${m.price.toFixed(2)}, Stock: ${m.stock}`)
+    .map(m => `- ${m.name}: Price PKR ${m.price.toFixed(2)}, Stock: ${m.stock}, Generic: ${m.generic}, Brand: ${m.brand}`)
     .join('\n');
 
   return `You are "Amana", an intelligent and empathetic AI Pharmacy Assistant for Prime Pharmacy.
@@ -68,11 +136,25 @@ When a customer sends a message with their name, phone number and address all to
 Do NOT ask for information the customer has already provided.
 Acknowledge what you received and only ask for what is genuinely missing.
 
+IMPORTANT — MEDICINE SEARCH:
+When a customer types a medicine name (e.g. "Panadol 500mg", "Augmentin 625mg", "Cetirizine 10mg"), search the inventory and show the matching medicine(s) with:
+- Medicine Name and Strength
+- Price in PKR
+- Stock status (In Stock / Out of Stock)
+- Generic name and brand
+You MUST present matching results in a clear list format.
+
+IMPORTANT — ORDER CONFIRMATION:
+You may ONLY confirm and place an order if the customer has UPLOADED A PRESCRIPTION.
+If the customer asks to confirm an order WITHOUT uploading a prescription, you MUST politely refuse and ask them to upload their prescription first.
+Only after a prescription is uploaded and medicines are matched, you may present the order summary and ask for confirmation.
+
 Your workflow:
 1. Collect Full Name, Mobile Number, Delivery Address (accept in any order, any format)
 2. Once all 3 are collected, confirm them and ask for prescription upload
-3. Process prescription and match to inventory
-4. Confirm order before placing
+3. If customer types a medicine name, search inventory and show results (but don't allow ordering without prescription)
+4. Process prescription and match to inventory
+5. Confirm order before placing (ONLY if prescription was uploaded)
 
 Live Inventory:
 ${medicineListStr}
@@ -81,7 +163,8 @@ Rules:
 - Never hallucinate medicines. Only sell what is in stock.
 - Respond in the same language the customer writes in.
 - Be warm, professional, and brief.
-- If customer provides all info in one message, acknowledge all of it at once.`;
+- If customer provides all info in one message, acknowledge all of it at once.
+- Never confirm/place an order without a prescription upload.`;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -98,6 +181,10 @@ export async function getAIResponse(
   const lastUserMessage = userMessages[userMessages.length - 1];
   const lastText = lastUserMessage?.text || '';
 
+  // ── Check if customer is typing a medicine name (e.g. "Panadol 500mg") ──
+  const medResults = searchMedicineByName(lastText, medicines);
+  const isMedicineSearch = medResults.length > 0 && !isPersonalInfo(lastText);
+
   // ── SMART INFO EXTRACTION from ALL user messages combined ─────────────────
   const allUserText = userMessages.map(m => m.text).join(' ');
   const extracted = parseCustomerInfoFromText(allUserText);
@@ -112,10 +199,18 @@ export async function getAIResponse(
   const hasAddress = merged.address.trim().length > 0;
   const infoComplete = hasName && hasPhone && hasAddress;
 
+  // ── Check if a prescription has been uploaded ──────────────────────────────
+  const hasPrescription = chatHistory.some(m => m.type === 'order_summary' || m.text?.includes('📋'));
+
+  // ── If customer is searching for a medicine by name ──────────────────────
+  if (isMedicineSearch) {
+    return buildMedicineSearchResponse(medResults, lang, hasPrescription);
+  }
+
   const apiKey = process.env.NEXT_PUBLIC_OPENROUTER_API_KEY || process.env.OPENROUTER_API_KEY || '';
 
   if (!apiKey) {
-    return handleLocalFallback(chatHistory, lang, store, merged, infoComplete);
+    return handleLocalFallback(chatHistory, lang, store, merged, infoComplete, hasPrescription);
   }
 
   try {
@@ -140,6 +235,19 @@ export async function getAIResponse(
       apiMessages.push({
         role: 'system',
         content: `[SYSTEM NOTE] Collected so far: Name="${merged.name || 'missing'}", Phone="${merged.phone || 'missing'}", Address="${merged.address || 'missing'}". Only ask for: ${missing.join(', ')}.`
+      });
+    }
+
+    // Tell AI whether prescription has been uploaded
+    if (hasPrescription) {
+      apiMessages.push({
+        role: 'system',
+        content: `[SYSTEM NOTE] A prescription HAS been uploaded and medicines matched. You may now present order summary and ask for confirmation.`
+      });
+    } else {
+      apiMessages.push({
+        role: 'system',
+        content: `[SYSTEM NOTE] No prescription has been uploaded yet. Do NOT confirm or place any order. If customer asks to order, ask them to upload a prescription first.`
       });
     }
 
@@ -183,8 +291,74 @@ export async function getAIResponse(
 
   } catch (error) {
     console.error('OpenRouter failed, using fallback:', error);
-    return handleLocalFallback(chatHistory, lang, store, merged, infoComplete);
+    return handleLocalFallback(chatHistory, lang, store, merged, infoComplete, hasPrescription);
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HELPER: detect if message is personal info (name/phone/address) not medicine search
+// ─────────────────────────────────────────────────────────────────────────────
+function isPersonalInfo(text: string): boolean {
+  const lower = text.toLowerCase();
+  // Contains phone number patterns
+  const hasPhone = /(?:\+92|\+966|0)[0-9\s\-]{8,13}/.test(text);
+  // Contains common address keywords
+  const hasAddressWords = /\b(street|road|block|sector|phase|town|colony|abad|nagar|near|house|plot|building)\b/i.test(lower);
+  return hasPhone || hasAddressWords;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MEDICINE SEARCH RESPONSE BUILDER
+// ─────────────────────────────────────────────────────────────────────────────
+function buildMedicineSearchResponse(
+  results: Medicine[],
+  lang: 'en' | 'ar' | 'ur',
+  hasPrescription: boolean
+): AIMessage {
+  const msgId = 'msg-' + Math.random().toString(36).substr(2, 9);
+  const timestamp = new Date().toISOString();
+
+  let text = '';
+  if (lang === 'ar') {
+    text = `🔍 وجدت الأدوية التالية في مخزوننا:\n\n`;
+  } else if (lang === 'ur') {
+    text = `🔍 ہمارے اسٹاک میں درج ذیل ادویات مل گئی ہیں:\n\n`;
+  } else {
+    text = `🔍 I found these medicines in our inventory:\n\n`;
+  }
+
+  results.forEach((med, i) => {
+    const stockStatus = med.stock > 0
+      ? (lang === 'ar' ? 'متوفر' : lang === 'ur' ? 'دستیاب' : 'In Stock')
+      : (lang === 'ar' ? 'غير متوفر' : lang === 'ur' ? 'ناموجود' : 'Out of Stock');
+
+    text += `**${i + 1}. ${med.name}** ${med.strength || ''}\n`;
+    text += `   💊 Brand: ${med.brand} | Generic: ${med.generic}\n`;
+    text += `   💰 Price: Rs ${med.price.toFixed(2)}\n`;
+    text += `   📦 Stock: ${med.stock} units — ${stockStatus}\n`;
+    if (med.prescriptionRequired) {
+      text += `   ⚠️ Prescription Required\n`;
+    }
+    text += `\n`;
+  });
+
+  if (!hasPrescription) {
+    if (lang === 'ar') {
+      text += `\n📋 لتأكيد الطلب، يرجى تحميل وصفة طبية أولاً.`;
+    } else if (lang === 'ur') {
+      text += `\n📋 آرڈر کی تصدیق کے لیے، براہ کرم پہلے نسخہ اپ لوڈ کریں۔`;
+    } else {
+      text += `\n📋 To place an order, please upload a prescription first.`;
+    }
+  }
+
+  return {
+    id: msgId,
+    sender: 'assistant',
+    text,
+    timestamp,
+    type: 'medicine_list'
+  };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -195,13 +369,33 @@ function handleLocalFallback(
   lang: 'en' | 'ar' | 'ur',
   store: any,
   customer: TempCustomer,
-  infoComplete: boolean
+  infoComplete: boolean,
+  hasPrescription: boolean
 ): AIMessage {
   const msgId = 'msg-' + Math.random().toString(36).substr(2, 9);
   const timestamp = new Date().toISOString();
   const userMessages = chatHistory.filter(m => m.sender === 'user');
   const lastText = userMessages[userMessages.length - 1]?.text || '';
   const cleanText = lastText.toLowerCase().trim();
+
+  // ── Check for medicine search ──────────────────────────────────────────────
+  const medResults = searchMedicineByName(lastText, store.medicines);
+  if (medResults.length > 0 && !isPersonalInfo(lastText)) {
+    return buildMedicineSearchResponse(medResults, lang, hasPrescription);
+  }
+
+  // ── Check for order confirmation without prescription ──────────────────────
+  const isConfirm = ['confirm', 'yes', 'y', 'ok', 'place order', 'تأكيد', 'نعم', 'ہاں', 'تصدیق'].some(kw => cleanText.includes(kw));
+  const lastSummary = [...chatHistory].reverse().find(m => m.type === 'order_summary');
+
+  if (isConfirm && !hasPrescription) {
+    const noPrescMsg = {
+      en: '📋 To place an order, you must upload a prescription first. Please tap the camera 📷 button below to upload your doctor\'s prescription.',
+      ar: '📋 لتسجيل الطلب، يجب تحميل وصفة طبية أولاً. يرجى النقر على زر الكاميرا 📷 أدناه لتحميل وصفتك.',
+      ur: '📋 آرڈر کے لیے، آپ کو پہلے نسخہ اپ لوڈ کرنا ہوگا۔ براہ کرم نیچے کیمرہ 📷 بٹن پر کلک کر کے نسخہ اپ لوڈ کریں۔'
+    }[lang];
+    return { id: msgId, sender: 'assistant', text: noPrescMsg, timestamp, type: 'prescription_upload' };
+  }
 
   // ── Localized strings ──────────────────────────────────────────────────────
   const t = {
@@ -214,7 +408,8 @@ function handleLocalFallback(
       confirmOrder: (num: string) => `🎉 Order **${num}** placed! Our pharmacist will review and deliver soon.`,
       cancel: "Order cancelled. Let me know if you need help!",
       empty: "Your cart is empty. Please upload a prescription first.",
-      ready: "Ready to help! Please upload your prescription below 👇"
+      ready: "Ready to help! Please upload your prescription below 👇",
+      noPrescription: "📋 To place an order, you must upload a prescription first. Please tap the camera 📷 button below to upload your doctor's prescription."
     },
     ar: {
       askName: "هل يمكنك مشاركة **اسمك الكامل**؟",
@@ -225,7 +420,8 @@ function handleLocalFallback(
       confirmOrder: (num: string) => `🎉 تم تسجيل الطلب **${num}**! سيقوم الصيدلي بمراجعته وتسليمه قريباً.`,
       cancel: "تم إلغاء الطلب. أخبرني إذا احتجت مساعدة!",
       empty: "سلتك فارغة. يرجى تحميل وصفة طبية أولاً.",
-      ready: "أنا مستعد! يرجى تحميل وصفتك الطبية أدناه 👇"
+      ready: "أنا مستعد! يرجى تحميل وصفتك الطبية أدناه 👇",
+      noPrescription: "📋 لتسجيل الطلب، يجب تحميل وصفة طبية أولاً. يرجى النقر على زر الكاميرا 📷 أدناه لتحميل وصفتك."
     },
     ur: {
       askName: "براہ کرم اپنا **مکمل نام** بتائیں۔",
@@ -236,7 +432,8 @@ function handleLocalFallback(
       confirmOrder: (num: string) => `🎉 آرڈر **${num}** بک ہو گیا! فارماسسٹ جلد ڈیلیور کریں گے۔`,
       cancel: "آرڈر منسوخ کر دیا گیا۔ مدد کے لیے بتائیں!",
       empty: "کارٹ خالی ہے۔ پہلے نسخہ اپ لوڈ کریں۔",
-      ready: "تیار ہوں! نیچے نسخہ اپ لوڈ کریں 👇"
+      ready: "تیار ہوں! نیچے نسخہ اپ لوڈ کریں 👇",
+      noPrescription: "📋 آرڈر کے لیے، آپ کو پہلے نسخہ اپ لوڈ کرنا ہوگا۔ براہ کرم نیچے کیمرہ 📷 بٹن پر کلک کریں۔"
     }
   }[lang];
 
@@ -256,12 +453,10 @@ function handleLocalFallback(
       };
     }
 
-    // Check for order confirmation
-    const isConfirm = ['confirm', 'yes', 'y', 'ok', 'تأكيد', 'نعم', 'ہاں', 'تصدیق'].some(kw => cleanText.includes(kw));
+    // Check for order confirmation (ONLY with prescription)
     const isCancel = ['cancel', 'no', 'إلغاء', 'لا', 'منسوخ', 'نہیں'].some(kw => cleanText.includes(kw));
-    const lastSummary = [...chatHistory].reverse().find(m => m.type === 'order_summary');
 
-    if (lastSummary && isConfirm) {
+    if (lastSummary && isConfirm && hasPrescription) {
       const cartItems: CartItem[] = store.cart;
       if (!cartItems.length) {
         return { id: msgId, sender: 'assistant', text: t.empty, timestamp };
@@ -287,6 +482,10 @@ function handleLocalFallback(
       store.addOrder(newOrder);
       store.clearCart();
       return { id: msgId, sender: 'assistant', text: t.confirmOrder(orderNum), timestamp, type: 'order_success' as any };
+    }
+
+    if (isConfirm && !hasPrescription) {
+      return { id: msgId, sender: 'assistant', text: t.noPrescription, timestamp, type: 'prescription_upload' };
     }
 
     if (lastSummary && isCancel) {

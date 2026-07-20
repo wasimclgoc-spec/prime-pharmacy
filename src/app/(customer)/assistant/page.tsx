@@ -23,7 +23,10 @@ import {
   AlertTriangle,
   X,
   Plus,
-  ShoppingBag
+  ShoppingBag,
+  PhoneCall,
+  Volume2,
+  VolumeX
 } from 'lucide-react';
 import { Medicine } from '../../../types';
 
@@ -48,6 +51,11 @@ export default function AssistantPage() {
   const [inputText, setInputText] = useState('');
   const [isAiTyping, setIsAiTyping] = useState(false);
   const [isListening, setIsListening] = useState(false);
+  
+  // Voice Talk (conversation mode) state
+  const [isVoiceMode, setIsVoiceMode] = useState(false);
+  const [isAiSpeaking, setIsAiSpeaking] = useState(false);
+  const [voiceTranscript, setVoiceTranscript] = useState('');
   
   // Modals / Overlays
   const [isUploadOpen, setIsUploadOpen] = useState(false);
@@ -124,6 +132,13 @@ export default function AssistantPage() {
         
         rec.onresult = (event: any) => {
           const speechToText = event.results[0][0].transcript;
+          setVoiceTranscript(speechToText);
+          
+          // In voice mode, auto-send the message
+          if (useStore.getState().chatHistory !== undefined) {
+            const store = useStore.getState();
+            store.addChatMessage({ sender: 'user', text: speechToText, timestamp: new Date().toISOString() });
+          }
           setInputText(prev => prev + ' ' + speechToText);
         };
         
@@ -164,6 +179,71 @@ export default function AssistantPage() {
     }
   };
 
+  // ── Voice Talk (Conversation Mode) ──────────────────────────
+  // Text-to-Speech: AI speaks its response
+  const speakText = (text: string) => {
+    if (typeof window === 'undefined' || !window.speechSynthesis) return;
+    window.speechSynthesis.cancel();
+    const cleanText = text.replace(/**/g, '').replace(/📋|🔍|💊|💰|📦|⚠️|🎉|✅|❓|👤|📱|📍|👉/g, '');
+    const utterance = new SpeechSynthesisUtterance(cleanText);
+    const ttsLangs = { en: 'en-US', ar: 'ar-SA', ur: 'ur-PK' };
+    utterance.lang = ttsLangs[lang];
+    utterance.rate = 0.95;
+    utterance.pitch = 1.0;
+    utterance.onstart = () => setIsAiSpeaking(true);
+    utterance.onend = () => {
+      setIsAiSpeaking(false);
+      // Auto-listen again in voice mode
+      if (isVoiceMode && recognitionRef.current) {
+        setTimeout(() => {
+          try {
+            const speechLangs = { en: 'en-US', ar: 'ar-SA', ur: 'ur-PK' };
+            recognitionRef.current.lang = speechLangs[lang];
+            recognitionRef.current.start();
+          } catch (e) {}
+        }, 500);
+      }
+    };
+    window.speechSynthesis.speak(utterance);
+  };
+  
+  // Stop all voice
+  const stopVoice = () => {
+    if (typeof window !== 'undefined' && window.speechSynthesis) {
+      window.speechSynthesis.cancel();
+    }
+    if (recognitionRef.current && isListening) {
+      recognitionRef.current.stop();
+    }
+    setIsAiSpeaking(false);
+    setIsListening(false);
+  };
+  
+  // Toggle Voice Talk Mode
+  const toggleVoiceMode = () => {
+    if (isVoiceMode) {
+      stopVoice();
+      setIsVoiceMode(false);
+    } else {
+      setIsVoiceMode(true);
+      // Greet and start listening
+      const greeting = lang === 'ar' ? 'مرحباً، أنا مساعدك الصوتي. تحدث وسأرد عليك.' :
+        lang === 'ur' ? 'سلام، میں آپ کا وائس اسسٹنٹ ہوں۔ بولیں، میں جواب دوں گا۔' :
+        'Hello, I am your voice assistant. Speak and I will respond.';
+      speakText(greeting);
+      setTimeout(() => {
+        if (recognitionRef.current) {
+          try {
+            const speechLangs = { en: 'en-US', ar: 'ar-SA', ur: 'ur-PK' };
+            recognitionRef.current.lang = speechLangs[lang];
+            recognitionRef.current.start();
+          } catch (e) {}
+        }
+      }, 2500);
+    }
+  };
+  
+
   // Send message to AI
   const handleSendMessage = async (textToSend?: string) => {
     const text = textToSend || inputText;
@@ -190,6 +270,10 @@ export default function AssistantPage() {
       await new Promise(resolve => setTimeout(resolve, 800));
 
       addChatMessage(aiResponse);
+      // Speak AI response in voice mode
+      if (isVoiceMode) {
+        speakText(aiResponse.text);
+      }
     } catch (err) {
       console.error('Failed to get AI reply:', err);
     } finally {
@@ -440,6 +524,18 @@ export default function AssistantPage() {
           </div>
         </div>
 
+        {/* Voice Talk Button */}
+        <button
+          onClick={toggleVoiceMode}
+          className={`p-2.5 rounded-xl transition-all duration-300 shrink-0 ${
+            isVoiceMode
+              ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-600/30'
+              : 'bg-slate-100 dark:bg-slate-800 text-slate-500 hover:text-emerald-600 dark:hover:text-emerald-400'
+          }`}
+          title="Voice Talk"
+        >
+          {isVoiceMode ? <PhoneCall size={16} className="animate-pulse" /> : <PhoneCall size={15} />}
+        </button>
         {/* Configurations */}
         <div className="flex items-center space-x-2.5 rtl:space-x-reverse">
           {/* Language Selector */}
@@ -695,6 +791,90 @@ export default function AssistantPage() {
               </div>
             </motion.div>
           </div>
+        )}
+      </AnimatePresence>
+
+      {/* Voice Talk Overlay */}
+      <AnimatePresence>
+        {isVoiceMode && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[60] bg-gradient-to-b from-emerald-950/95 to-slate-950/95 backdrop-blur-xl flex flex-col items-center justify-center p-6"
+          >
+            {/* Close button */}
+            <button
+              onClick={toggleVoiceMode}
+              className="absolute top-6 right-6 p-2.5 bg-white/10 hover:bg-white/20 text-white rounded-2xl transition-colors"
+            >
+              <X size={20} />
+            </button>
+
+            {/* AI Avatar with pulse animation */}
+            <div className="relative mb-8">
+              {isAiSpeaking && (
+                <>
+                  <div className="absolute inset-0 rounded-full bg-emerald-400/20 animate-ping" style={{ animationDuration: '1.5s' }} />
+                  <div className="absolute inset-0 rounded-full bg-emerald-400/10 animate-ping" style={{ animationDuration: '2s', animationDelay: '0.3s' }} />
+                </>
+              )}
+              <div className={`w-28 h-28 rounded-full bg-gradient-to-tr from-emerald-500 to-teal-400 flex items-center justify-center text-white shadow-2xl shadow-emerald-500/30 ${isAiSpeaking ? 'scale-110' : 'scale-100'} transition-transform duration-300`}>
+                {isAiSpeaking ? (
+                  <Volume2 size={42} className="animate-pulse" />
+                ) : isListening ? (
+                  <Mic size={42} className="animate-pulse" />
+                ) : (
+                  <Sparkles size={42} />
+                )}
+              </div>
+            </div>
+
+            {/* Status text */}
+            <div className="text-center mb-6">
+              <p className="text-white font-bold text-lg mb-1">
+                {isAiSpeaking
+                  ? (lang === 'ar' ? 'الذكاء الاصطناعي يتحدث...' : lang === 'ur' ? 'AI بول رہا ہے...' : 'AI is speaking...')
+                  : isListening
+                  ? (lang === 'ar' ? 'أستمع إليك...' : lang === 'ur' ? 'آپ کی بات سن رہا ہوں...' : 'Listening to you...')
+                  : (lang === 'ar' ? 'اضغط للتحدث' : lang === 'ur' ? 'بولنے کے لیے دبائیں' : 'Tap to speak')}
+              </p>
+              {voiceTranscript && (
+                <p className="text-emerald-300/80 text-sm mt-2 max-w-md italic">"{voiceTranscript}"</p>
+              )}
+            </div>
+
+            {/* Mic button */}
+            <button
+              onClick={() => {
+                if (isListening && recognitionRef.current) {
+                  recognitionRef.current.stop();
+                } else if (recognitionRef.current) {
+                  const speechLangs = { en: 'en-US', ar: 'ar-SA', ur: 'ur-PK' };
+                  recognitionRef.current.lang = speechLangs[lang];
+                  recognitionRef.current.start();
+                }
+              }}
+              className={`w-20 h-20 rounded-full flex items-center justify-center transition-all duration-300 shadow-2xl ${
+                isListening
+                  ? 'bg-red-500 hover:bg-red-600 scale-110 animate-pulse'
+                  : 'bg-emerald-600 hover:bg-emerald-700 hover:scale-105'
+              }`}
+            >
+              {isListening ? <MicOff size={28} className="text-white" /> : <Mic size={28} className="text-white" />}
+            </button>
+
+            {/* Stop voice button */}
+            <button
+              onClick={() => {
+                stopVoice();
+                setIsVoiceMode(false);
+              }}
+              className="mt-8 px-6 py-2.5 bg-white/10 hover:bg-white/20 text-white/80 hover:text-white rounded-xl text-sm font-semibold transition-colors"
+            >
+              {lang === 'ar' ? 'إنهاء المحادثة الصوتية' : lang === 'ur' ? 'وائس چیٹ ختم کریں' : 'End Voice Chat'}
+            </button>
+          </motion.div>
         )}
       </AnimatePresence>
     </div>
