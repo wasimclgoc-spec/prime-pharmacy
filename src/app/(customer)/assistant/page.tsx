@@ -144,8 +144,23 @@ export default function AssistantPage() {
         
         rec.onerror = (event: any) => {
           console.error('Speech recognition error:', event.error);
-          alert(t('voiceInputError'));
           setIsListening(false);
+          // Only alert for real errors, not 'no-speech' or 'aborted' which are normal
+          if (event.error !== 'no-speech' && event.error !== 'aborted' && event.error !== 'network') {
+            console.warn('Mic error:', event.error);
+          }
+          // If in voice mode and not aborted by user, try restarting after short delay
+          if (event.error === 'no-speech' && isVoiceMode) {
+            setTimeout(() => {
+              try {
+                if (recognitionRef.current) {
+                  const speechLangs: Record<string, string> = { en: 'en-US', ar: 'ar-SA', ur: 'ur-PK' };
+                  recognitionRef.current.lang = speechLangs[lang] || 'en-US';
+                  recognitionRef.current.start();
+                }
+              } catch (e) {}
+            }, 1000);
+          }
         };
         
         rec.onend = () => {
@@ -220,11 +235,36 @@ export default function AssistantPage() {
   };
   
   // Toggle Voice Talk Mode
-  const toggleVoiceMode = () => {
+  const toggleVoiceMode = async () => {
     if (isVoiceMode) {
       stopVoice();
       setIsVoiceMode(false);
     } else {
+      // Check browser support first
+      const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+      if (!SpeechRecognition) {
+        addChatMessage({
+          id: 'msg-' + Math.random().toString(36).substr(2, 9),
+          sender: 'assistant',
+          text: '⚠️ Voice recognition is not supported in your browser. Please use Chrome or Safari.',
+          timestamp: new Date().toISOString()
+        });
+        return;
+      }
+
+      // Request mic permission first
+      try {
+        await navigator.mediaDevices.getUserMedia({ audio: true });
+      } catch (err) {
+        addChatMessage({
+          id: 'msg-' + Math.random().toString(36).substr(2, 9),
+          sender: 'assistant',
+          text: '🎙️ Microphone access denied. Please allow microphone permission in your browser settings and try again.',
+          timestamp: new Date().toISOString()
+        });
+        return;
+      }
+
       setIsVoiceMode(true);
       // Greet and start listening
       const greeting = lang === 'ar' ? 'مرحباً، أنا مساعدك الصوتي. تحدث وسأرد عليك.' :
@@ -234,12 +274,14 @@ export default function AssistantPage() {
       setTimeout(() => {
         if (recognitionRef.current) {
           try {
-            const speechLangs = { en: 'en-US', ar: 'ar-SA', ur: 'ur-PK' };
-            recognitionRef.current.lang = speechLangs[lang];
+            const speechLangs: Record<string, string> = { en: 'en-US', ar: 'ar-SA', ur: 'ur-PK' };
+            recognitionRef.current.lang = speechLangs[lang] || 'en-US';
             recognitionRef.current.start();
-          } catch (e) {}
+          } catch (e) {
+            console.warn('Could not start recognition:', e);
+          }
         }
-      }, 2500);
+      }, 2800);
     }
   };
   
@@ -850,9 +892,13 @@ export default function AssistantPage() {
                 if (isListening && recognitionRef.current) {
                   recognitionRef.current.stop();
                 } else if (recognitionRef.current) {
-                  const speechLangs = { en: 'en-US', ar: 'ar-SA', ur: 'ur-PK' };
-                  recognitionRef.current.lang = speechLangs[lang];
-                  recognitionRef.current.start();
+                  try {
+                    const speechLangs: Record<string, string> = { en: 'en-US', ar: 'ar-SA', ur: 'ur-PK' };
+                    recognitionRef.current.lang = speechLangs[lang] || 'en-US';
+                    recognitionRef.current.start();
+                  } catch (e) {
+                    console.warn('Recognition start error:', e);
+                  }
                 }
               }}
               className={`w-20 h-20 rounded-full flex items-center justify-center transition-all duration-300 shadow-2xl ${
