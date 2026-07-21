@@ -88,14 +88,15 @@ export async function POST(req: NextRequest) {
     const medResults = searchMedicineByName(msg, medicines);
 
     if (medResults.length > 0 && !isPersonalInfo) {
-      let response = `💊 Medicine Search Results:\n\n`;
+      let response = `💊 Found ${medResults.length} medicine(s):\n\n`;
       medResults.forEach((med, i) => {
         response += `${i + 1}. ${med.name}\n`;
-        response += `   Price: Rs ${med.price.toFixed(2)}\n`;
-        response += `   Stock: ${med.stock} units\n`;
-        response += `   ${med.prescriptionRequired ? '⚠️ Prescription required' : '✅ No prescription needed'}\n\n`;
+        response += `   💰 Price: Rs ${med.price.toFixed(2)}\n`;
+        response += `   📦 Stock: ${med.stock} units\n`;
+        response += `   🏷️ Brand: ${med.brand} | Generic: ${med.generic}\n`;
+        response += `   ${med.prescriptionRequired ? '⚠️ Rx Medicine' : '✅ OTC (No prescription)'}\n\n`;
       });
-      response += `To order, type the medicine name and quantity.\nExample: "2 Panadol 500mg"`;
+      response += `To order, type quantity + medicine name.\nExample: "2 ${medResults[0].name}"`;
 
       return NextResponse.json({ reply: response });
     }
@@ -128,7 +129,7 @@ export async function POST(req: NextRequest) {
 
     // ── Add to cart (e.g. "2 Panadol 500mg") ──
     const orderMatch = msg.match(/^(\d+)\s+(.+)$/i);
-    if (orderMatch && (session.stage === 'ready_to_order' || session.stage === 'ordering')) {
+    if (orderMatch) {
       const quantity = parseInt(orderMatch[1]);
       const medName = orderMatch[2];
       const results = searchMedicineByName(medName, medicines);
@@ -145,27 +146,16 @@ export async function POST(req: NextRequest) {
         const cartTotal = session.cart.reduce((sum, item) => sum + (item.price * item.quantity), 0);
         session.stage = 'ordering';
 
+        const needsInfo = !session.name || !session.address;
         return NextResponse.json({
-          reply: `✅ Added to cart:\n${med.name} × ${quantity} = Rs ${(med.price * quantity).toFixed(2)}\n\n🛒 Cart Total: Rs ${cartTotal.toFixed(2)}\n\nType "confirm order" to place your order, or search for more medicines.`
+          reply: `✅ Added to cart:\n${med.name} × ${quantity} = Rs ${(med.price * quantity).toFixed(2)}\n\n🛒 Cart Total: Rs ${cartTotal.toFixed(2)}\n\n${needsInfo ? 'To checkout, send your name and address.\nExample: "Ahmed 03001234567 Gulberg Lahore"\n\nOr add more medicines by typing name.' : 'Type "confirm order" to checkout, or add more medicines.'}`
         });
       }
     }
 
     // ── Confirm order ──
     if (/confirm|place order|order karo|order karein/i.test(msg) && session.cart.length > 0) {
-      if (!session.prescriptionUploaded) {
-        const hasRxMeds = session.cart.some(item => {
-          const med = medicines.find(m => m.id === item.medicineId);
-          return med?.prescriptionRequired;
-        });
-
-        if (hasRxMeds) {
-          return NextResponse.json({
-            reply: `⚠️ Your cart contains prescription medicines.\n\nPlease upload your prescription photo first, then I can confirm the order.\n\nJust send the image here on WhatsApp.`
-          });
-        }
-      }
-
+      // Prescription is optional — place order directly
       const orderNumber = 'ORD-' + Math.floor(10000 + Math.random() * 90000);
       const total = session.cart.reduce((sum, item) => sum + (item.price * item.quantity), 0);
 

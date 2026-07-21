@@ -82,14 +82,15 @@ export async function handleWhatsAppMessage(
   // ── Check if customer is searching for a medicine ──
   const medResults = searchMedicineByName(message, medicines);
   if (medResults.length > 0 && !isPersonalInfo(message)) {
-    let response = `💊 *Medicine Search Results:*\n\n`;
+    let response = `💊 *Found ${medResults.length} medicine(s):*\n\n`;
     medResults.forEach((med, i) => {
       response += `${i + 1}. *${med.name}*\n`;
-      response += `   Price: Rs ${med.price.toFixed(2)}\n`;
-      response += `   Stock: ${med.stock} units\n`;
-      response += `   ${med.prescriptionRequired ? '⚠️ Prescription required' : '✅ No prescription needed'}\n\n`;
+      response += `   💰 Price: Rs ${med.price.toFixed(2)}\n`;
+      response += `   📦 Stock: ${med.stock} units\n`;
+      response += `   🏷️ Brand: ${med.brand} | Generic: ${med.generic}\n`;
+      response += `   ${med.prescriptionRequired ? '⚠️ Rx Medicine' : '✅ OTC (No prescription)'}\n\n`;
     });
-    response += `To order, type the medicine name and quantity.\nExample: "2 Panadol 500mg"`;
+    response += `To order, type quantity + medicine name.\nExample: "2 ${medResults[0].name}"`;
 
     await sendWhatsAppText(from, phoneNumberId, response);
     return;
@@ -125,7 +126,7 @@ export async function handleWhatsAppMessage(
 
   // ── Handle order intent (medicine name + quantity) ──
   const orderMatch = message.match(/^(\d+)\s+(.+)$/i);
-  if (orderMatch && session.stage === 'ready_to_order') {
+  if (orderMatch && (session.stage === 'ready_to_order' || session.stage === 'ordering' || session.stage === 'greeting' || session.stage === 'collecting_info')) {
     const quantity = parseInt(orderMatch[1]);
     const medName = orderMatch[2];
     const results = searchMedicineByName(medName, medicines);
@@ -150,20 +151,7 @@ export async function handleWhatsAppMessage(
 
   // ── Confirm order ──
   if (/confirm|place order|order karo|order karein/i.test(message) && session.cart.length > 0) {
-    if (!session.prescriptionUploaded) {
-      const hasRxMeds = session.cart.some(item => {
-        const med = medicines.find(m => m.id === item.medicineId);
-        return med?.prescriptionRequired;
-      });
-
-      if (hasRxMeds) {
-        await sendWhatsAppText(from, phoneNumberId,
-          `⚠️ Your cart contains prescription medicines.\n\nPlease upload your prescription photo first, then I can confirm the order.\n\nJust send the image here on WhatsApp.`
-        );
-        return;
-      }
-    }
-
+    // Prescription is optional — place order directly
     // Place the order
     const orderNumber = 'ORD-' + Math.floor(10000 + Math.random() * 90000);
     const total = session.cart.reduce((sum, item) => sum + (item.price * item.quantity), 0);

@@ -48,7 +48,7 @@ export function searchMedicineByName(query: string, inventory: Medicine[]): Medi
   }
 
   results.sort((a, b) => b.score - a.score);
-  return results.slice(0, 5).map(r => r.med);
+  return results.map(r => r.med);
 }
 
 // ── Customer Info Extractor (server-safe) ──────────────────────────────
