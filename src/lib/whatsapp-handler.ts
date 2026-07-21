@@ -240,7 +240,7 @@ export async function handleWhatsAppMessage(from: string, message: string, phone
   }
 
   // ── 7. ORDER: quantity + medicine name ────────────────────────────
-  const orderMatch = msg.match(/^(?:(?:i\s+)?(?:need|want|order|would\s+like|give\s+me)\s+)?(\d+)\s+(?:tablets?|capsules?|caps?|pcs?|pieces?|strips?|boxes?|of\s+)*\s*([a-zA-Z].+)$/i);
+  const orderMatch = !collectingInfo && msg.match(/^(?:(?:i\s+)?(?:need|want|order|would\s+like|give\s+me)\s+)?(\d+)\s+(?:tablets?|capsules?|caps?|pcs?|pieces?|strips?|boxes?|of\s+)*\s*([a-zA-Z].+)$/i);
   if (orderMatch) {
     const quantity = parseInt(orderMatch[1]);
     const medName = orderMatch[2].replace(/^of\s+/i, '').trim();
@@ -408,7 +408,7 @@ export async function handleWhatsAppMessage(from: string, message: string, phone
   }
 
   // ── 14. MEDICINE SEARCH (no quantity) ────────────────────────────
-  const medResults = searchMedicineByName(msg, medicines);
+  const medResults = !collectingInfo ? searchMedicineByName(msg, medicines) : [];
   if (medResults.length > 0) {
     if (medResults.length === 1) {
       const med = medResults[0];
@@ -425,7 +425,7 @@ export async function handleWhatsAppMessage(from: string, message: string, phone
   }
 
   // ── 15. OUT OF STOCK CHECK ────────────────────────────────────────
-  const outOfStockMed = findMedicineIncludingOutOfStock(msg, medicines);
+  const outOfStockMed = !collectingInfo ? findMedicineIncludingOutOfStock(msg, medicines) : null;
   if (outOfStockMed) {
     const subs = findSubstitutes(msg, medicines, outOfStockMed.id);
     let reply = `❌ *${outOfStockMed.name}* is out of stock.`;

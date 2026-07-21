@@ -328,7 +328,10 @@ Track: "track ${order.orderNumber}"` });
     }
 
     // ── 7. ORDER: quantity + medicine name ───────────────────────────
-    const orderMatch = msg.match(/^(?:(?:i\s+)?(?:need|want|order|would\s+like|give\s+me)\s+)?(\d+)\s+(?:tablets?|capsules?|caps?|pcs?|pieces?|strips?|boxes?|of\s+)*\s*([a-zA-Z].+)$/i);
+    // Skip generic parsers when we're collecting customer info
+    const collectingInfo = ['asking_name','asking_phone','asking_delivery','asking_address','asking_payment','ready_to_checkout'].includes(session.stage);
+
+    const orderMatch = !collectingInfo && msg.match(/^(?:(?:i\s+)?(?:need|want|order|would\s+like|give\s+me)\s+)?(\d+)\s+(?:tablets?|capsules?|caps?|pcs?|pieces?|strips?|boxes?|of\s+)*\s*([a-zA-Z].+)$/i);
     if (orderMatch) {
       const quantity = parseInt(orderMatch[1]);
       const medName = orderMatch[2].replace(/^of\s+/i, '').trim();
@@ -557,7 +560,7 @@ Track: "track ${order.orderNumber}"` });
     }
 
     // ── 15. MEDICINE SEARCH (no quantity provided) ───────────────────
-    const medResults = searchMedicineByName(msg, medicines);
+    const medResults = !collectingInfo ? searchMedicineByName(msg, medicines) : [];
     if (medResults.length > 0) {
       if (medResults.length === 1) {
         const med = medResults[0];
@@ -574,7 +577,7 @@ Track: "track ${order.orderNumber}"` });
     }
 
     // ── 16. CHECK if medicine exists but out of stock ────────────────
-    const outOfStockMed = findMedicineIncludingOutOfStock(msg, medicines);
+    const outOfStockMed = !collectingInfo ? findMedicineIncludingOutOfStock(msg, medicines) : null;
     if (outOfStockMed) {
       const subs = findSubstitutes(msg, medicines, outOfStockMed.id);
       let reply = `❌ *${outOfStockMed.name}* is currently out of stock.`;
