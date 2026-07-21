@@ -148,7 +148,7 @@ export async function POST(req: NextRequest) {
     if (isGreeting) {
       Object.assign(session, { name: '', phone: '', address: '', deliveryType: '', cart: [], stage: 'greeting', editOrderNumber: '', pendingNewTime: '' });
       return NextResponse.json({
-        reply: `👋 Welcome to Prime Pharmacy!\n\nI can help you with:\n💊 Search medicines by name\n🛒 Place orders\n📦 Track orders (type "track ORD-XXXXX")\n❌ Cancel order\n🔄 Reschedule order\n✏️ Edit order\n\nType a medicine name to search!`
+        reply: `👋 Welcome to Prime Pharmacy!\n\nType medicine name + quantity to order.\nExample: "5 Glucophage" or "I need 10 Panadol 500mg"\n\nOr type a medicine name to search.`
       });
     }
 
@@ -238,7 +238,7 @@ export async function POST(req: NextRequest) {
     const orderMatch = msg.match(/(?:^|(?:i\s+(?:need|want|order|would\s+like)\s+|give\s+me\s+|order\s+))(\d+)\s+([a-zA-Z].+)$/i);
     if (orderMatch) {
       const quantity = parseInt(orderMatch[1]);
-      const medName = orderMatch[2].trim();
+      const medName = orderMatch[2].replace(/^of\s+/i, '').trim();
 
       // Directly find best medicine match — no intermediate search screen
       const med = findMedicineForOrder(medName, medicines);
@@ -420,7 +420,7 @@ export async function POST(req: NextRequest) {
     }
 
     return NextResponse.json({
-      reply: `I can help you with:\n💊 Search medicines by name\n🛒 Order: type "2 Panadol 500mg"\n📦 Track: "track ORD-12345"\n❌ Cancel: "cancel ORD-12345"\n🔄 Reschedule: "reschedule ORD-12345"\n✏️ Edit: "edit ORD-12345"\n\nWhat would you like?`
+      reply: `Type a medicine name + quantity to order.\nExample: "5 Glucophage" or "10 Panadol 500mg"\n\nOr type a medicine name to search.`
     });
 
   } catch (error) {
