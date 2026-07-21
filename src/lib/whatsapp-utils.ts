@@ -1,5 +1,73 @@
 import { Medicine } from '../types';
 
+
+// ── Global Medicine Brand Alias Map ──────────────────────────────────────
+// Maps well-known brand names to their generic/salt so AI can match them
+// even if that exact brand isn't in inventory
+const MEDICINE_ALIASES: Record<string, string[]> = {
+  // Pain / Fever
+  tylenol:      ['paracetamol', 'acetaminophen'],
+  panadol:      ['paracetamol'],
+  calpol:       ['paracetamol'],
+  disprin:      ['aspirin', 'paracetamol'],
+  brufen:       ['ibuprofen'],
+  advil:        ['ibuprofen'],
+  nurofen:      ['ibuprofen'],
+  voltaren:     ['diclofenac'],
+  ponstan:      ['mefenamic acid'],
+  // Antibiotics
+  augmentin:    ['amoxicillin', 'amoxicillin clavulanate'],
+  amoxil:       ['amoxicillin'],
+  zithromax:    ['azithromycin'],
+  azee:         ['azithromycin'],
+  cipro:        ['ciprofloxacin'],
+  flagyl:       ['metronidazole'],
+  // Antidiabetics
+  glucophage:   ['metformin'],
+  metformin:    ['metformin'],
+  januvia:      ['sitagliptin'],
+  lantus:       ['insulin glargine'],
+  // Cardiovascular
+  lipitor:      ['atorvastatin'],
+  crestor:      ['rosuvastatin'],
+  tenormin:     ['atenolol'],
+  // Antihistamines
+  claritin:     ['loratadine'],
+  zyrtec:       ['cetirizine'],
+  allegra:      ['fexofenadine'],
+  benadryl:     ['diphenhydramine'],
+  // Gastrointestinal
+  prilosec:     ['omeprazole'],
+  nexium:       ['esomeprazole'],
+  protonix:     ['pantoprazole'],
+  // Respiratory
+  ventolin:     ['salbutamol'],
+  flixotide:    ['fluticasone'],
+  // Vitamins
+  redoxon:      ['vitamin c', 'ascorbic acid'],
+  centrum:      ['multivitamin'],
+  dcure:        ['vitamin d', 'cholecalciferol'],
+  // Thyroid
+  synthroid:    ['levothyroxine'],
+  eltroxin:     ['levothyroxine'],
+};
+
+// Resolve aliases: returns list of possible generic names for a query
+function resolveAliases(query: string): string[] {
+  const words = query.toLowerCase().split(/\s+/);
+  const generics: string[] = [query]; // always include original
+  for (const word of words) {
+    if (MEDICINE_ALIASES[word]) {
+      generics.push(...MEDICINE_ALIASES[word]);
+    }
+    // also try combined multi-word aliases (e.g. "tylenol extra" → try "tylenol")
+  }
+  // Try full query as alias key too
+  const fullKey = query.toLowerCase().replace(/\s+/g, '');
+  if (MEDICINE_ALIASES[fullKey]) generics.push(...MEDICINE_ALIASES[fullKey]);
+  return [...new Set(generics)];
+}
+
 // ── Smart Medicine Search ─────────────────────────────────────────────────
 // Returns best match first. Ignores strength mismatch when brand/name is exact.
 export function searchMedicineByName(query: string, inventory: Medicine[]): Medicine[] {
@@ -17,52 +85,67 @@ export function searchMedicineByName(query: string, inventory: Medicine[]): Medi
 
   if (!nameOnly) return [];
 
+  // Resolve aliases — e.g. "Tylenol" → ["tylenol", "paracetamol", "acetaminophen"]
+  const searchTerms = resolveAliases(nameOnly);
+
   const results: { med: Medicine; score: number }[] = [];
 
   for (const med of inventory) {
-    if (med.stock <= 0 || med.status === 'Out of Stock') continue;
-
-    const medName    = med.name.toLowerCase();     // "metformin 850mg"
-    const medGeneric = med.generic.toLowerCase();  // "metformin"
-    const medBrand   = med.brand.toLowerCase();    // "glucophage"
+    // Include out-of-stock too — caller decides what to show
+    const medName    = med.name.toLowerCase();
+    const medGeneric = med.generic.toLowerCase();
+    const medBrand   = med.brand.toLowerCase();
+    const medFull    = `${medBrand} ${medGeneric} ${medName}`;
 
     let score = 0;
 
-    // ── Tier 1: Exact brand, generic or full name match ── 200
-    if (medBrand === nameOnly || medGeneric === nameOnly || medName === nameOnly ||
-        medName === `${nameOnly} ${queryStrength}`) {
-      score = 200;
-    }
-    // ── Tier 2: Brand or generic STARTS WITH query ── 160
-    else if (medBrand.startsWith(nameOnly) || medGeneric.startsWith(nameOnly) || medName.startsWith(nameOnly)) {
-      score = 160;
-    }
-    // ── Tier 3: Brand or generic CONTAINS query ── 120
-    else if (medBrand.includes(nameOnly) || medGeneric.includes(nameOnly) || medName.includes(nameOnly)) {
-      score = 120;
-    }
-    // ── Tier 4: Query contains brand or generic ── 100
-    else if (nameOnly.includes(medBrand) || nameOnly.includes(medGeneric)) {
-      score = 100;
-    }
-    // ── Tier 5: Word-level partial match (min 60% word overlap) ── 60-90
-    else {
-      const qWords = nameOnly.split(/\s+/).filter(w => w.length >= 3);
-      const mWords = `${medBrand} ${medGeneric} ${medName}`.split(/\s+/);
-      let hits = 0;
-      for (const qw of qWords) {
-        for (const mw of mWords) {
-          if (mw === qw || mw.startsWith(qw) || qw.startsWith(mw)) { hits++; break; }
+    // Check against ALL search terms (original + aliases)
+    for (const term of searchTerms) {
+      let termScore = 0;
+
+      // ── Tier 1: Exact match ── 200
+      if (medBrand === term || medGeneric === term || medName === term ||
+          medName === `${term} ${queryStrength}`) {
+        termScore = 200;
+      }
+      // ── Tier 2: Starts with ── 160
+      else if (medBrand.startsWith(term) || medGeneric.startsWith(term) || medName.startsWith(term)) {
+        termScore = 160;
+      }
+      // ── Tier 3: Contains term ── 120
+      else if (medBrand.includes(term) || medGeneric.includes(term) || medName.includes(term)) {
+        termScore = 120;
+      }
+      // ── Tier 4: Term contains brand/generic ── 100
+      else if (term.includes(medBrand) || term.includes(medGeneric)) {
+        termScore = 100;
+      }
+      // ── Tier 5: Word-level match ── 60-90
+      else {
+        const qWords = term.split(/\s+/).filter(w => w.length >= 3);
+        const mWords = medFull.split(/\s+/);
+        let hits = 0;
+        for (const qw of qWords) {
+          for (const mw of mWords) {
+            if (mw === qw || mw.startsWith(qw) || qw.startsWith(mw)) { hits++; break; }
+          }
+        }
+        if (qWords.length > 0 && hits / qWords.length >= 0.4) {
+          termScore = 50 + Math.round((hits / qWords.length) * 40);
         }
       }
-      if (qWords.length > 0 && hits / qWords.length >= 0.5) {
-        score = 60 + Math.round((hits / qWords.length) * 30);
-      }
+
+      // Alias matches get a slight penalty vs direct brand/name matches
+      const isAlias = term !== nameOnly;
+      if (isAlias && termScore > 0) termScore = Math.max(termScore - 10, 50);
+
+      if (termScore > score) score = termScore;
     }
 
-    // Bonus: strength match (but never penalise for wrong strength — customer may not know)
+    // Bonus: strength match
     if (score > 0 && queryStrength && medName.includes(queryStrength)) score += 20;
 
+    // Skip truly zero score
     if (score > 0) results.push({ med, score });
   }
 
@@ -135,6 +218,9 @@ export function findSubstitutes(medName: string, inventory: Medicine[], excludeI
 
 // ── Find out-of-stock medicine to check if it exists but is unavailable ────
 export function findMedicineIncludingOutOfStock(medName: string, inventory: Medicine[]): Medicine | null {
+  // Use the same search logic (which includes aliases) — searchMedicineByName searches all
+  const results = searchMedicineByName(medName, inventory);
+  // Also search including out-of-stock by temporarily including all
   const cleanQuery = medName.toLowerCase().trim();
   const nameOnly = cleanQuery
     .replace(/^\d+\s+/, '')
@@ -142,17 +228,21 @@ export function findMedicineIncludingOutOfStock(medName: string, inventory: Medi
     .replace(/\s+/g, ' ').trim();
   if (!nameOnly) return null;
 
+  const terms = resolveAliases(nameOnly);
   let best: { med: Medicine; score: number } | null = null;
 
   for (const med of inventory) {
     const mN = med.name.toLowerCase();
     const mG = med.generic.toLowerCase();
     const mB = med.brand.toLowerCase();
-    let score = 0;
-    if (mB === nameOnly || mG === nameOnly || mN === nameOnly) score = 200;
-    else if (mB.startsWith(nameOnly) || mG.startsWith(nameOnly) || mN.startsWith(nameOnly)) score = 160;
-    else if (mB.includes(nameOnly) || mG.includes(nameOnly) || mN.includes(nameOnly)) score = 120;
-    if (score > 0 && (!best || score > best.score)) best = { med, score };
+    for (const term of terms) {
+      let score = 0;
+      if (mB === term || mG === term || mN === term) score = 200;
+      else if (mB.startsWith(term) || mG.startsWith(term) || mN.startsWith(term)) score = 160;
+      else if (mB.includes(term) || mG.includes(term) || mN.includes(term)) score = 120;
+      else if (term.includes(mB) || term.includes(mG)) score = 100;
+      if (score > 0 && (!best || score > best.score)) best = { med, score };
+    }
   }
   return best ? best.med : null;
 }
