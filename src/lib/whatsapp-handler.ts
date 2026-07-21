@@ -46,11 +46,13 @@ export async function handleWhatsAppMessage(from: string, message: string, phone
   const lower = msg.toLowerCase();
 
   // ── EDIT FLOW ─────────────────────────────────────────────────────
-  if (session.stage === 'edit_order_awaiting_items') {
+  // ── ADD ITEMS to existing order (merge, don't replace) ──────────
+  if (session.stage === 'edit_add_items') {
     const order = findOrderByNumber(session.editOrderNumber);
     if (!order) { session.stage = 'greeting'; session.editOrderNumber = ''; await sendWhatsAppText(from, phoneNumberId, `❌ Order not found.`); return; }
+    const previousTotal = order.total;
     const itemTexts = msg.split(',').map(s => s.trim()).filter(Boolean);
-    const newItems: CartItem[] = [];
+    const addItems: CartItem[] = [];
     let parseError = '';
     for (const itemText of itemTexts) {
       const m = itemText.match(/^(\d+)\s+(.+)$/i);
@@ -58,15 +60,67 @@ export async function handleWhatsAppMessage(from: string, message: string, phone
       const qty = parseInt(m[1]);
       const med = findMedicineForOrder(m[2].trim(), medicines);
       if (!med) { parseError = `Not found: ${m[2]}`; break; }
-      newItems.push({ medicineId: med.id, name: med.name, price: med.price, quantity: qty });
+      if (med.stock < qty) { parseError = `Only ${med.stock} units of ${med.name} available`; break; }
+      addItems.push({ medicineId: med.id, name: med.name, price: med.price, quantity: qty });
     }
-    if (parseError) { await sendWhatsAppText(from, phoneNumberId, `❌ ${parseError}\n\nTry: "2 Panadol 500mg, 1 Amoxicillin 500mg"`); return; }
-    editOrder(session.editOrderNumber, { items: newItems });
+    if (parseError) { await sendWhatsAppText(from, phoneNumberId, `❌ ${parseError}`); return; }
+
+    editOrder(session.editOrderNumber, { addItems });
     const updated = findOrderByNumber(session.editOrderNumber);
-    session.stage = 'greeting'; session.editOrderNumber = '';
-    await sendWhatsAppText(from, phoneNumberId,
-      `✅ *Order Updated!*\n\n${updated.items.map((i, idx) => `${idx + 1}. ${i.name} × ${i.quantity} = Rs ${(i.price * i.quantity).toFixed(2)}`).join('\n')}\n\n*Total: Rs ${updated.total.toFixed(2)}*`);
-    return;
+    session.stage = 'edit_reconfirm';
+    (session as any)._revertItems = order.items;
+    (session as any)._revertTotal = previousTotal;
+
+    let summary = `📋 *Order Updated — Reconfirm?*\n\nOrder #: *${updated.orderNumber}*\n\n`;
+    summary += `*Previous items:*\n${order.items.map((i, idx) => `${idx + 1}. ${i.name} × ${i.quantity} = Rs ${(i.price * i.quantity).toFixed(2)}`).join('\n')}\n`;
+    summary += `*Previous Total: Rs ${previousTotal.toFixed(2)}*\n\n`;
+    summary += `*Added:*\n${addItems.map((i) => `+ ${i.name} × ${i.quantity} = Rs ${(i.price * i.quantity).toFixed(2)}`).join('\n')}\n\n`;
+    summary += `*Updated items:*\n${updated.items.map((i, idx) => `${idx + 1}. ${i.name} × ${i.quantity} = Rs ${(i.price * i.quantity).toFixed(2)}`).join('\n')}\n`;
+    summary += `\n*New Total: Rs ${updated.total.toFixed(2)}*`;
+    summary += `\n\nReply *"confirm"* to confirm, or *"cancel"* to revert.`;
+    await sendWhatsAppText(from, phoneNumberId, summary); return;
+  }
+
+  // ── REMOVE ITEMS from existing order ───────────────────────────
+  if (session.stage === 'edit_remove_items') {
+    const order = findOrderByNumber(session.editOrderNumber);
+    if (!order) { session.stage = 'greeting'; session.editOrderNumber = ''; await sendWhatsAppText(from, phoneNumberId, `❌ Order not found.`); return; }
+    const previousTotal = order.total;
+    const indicesToRemove = msg.split(',').map(s => parseInt(s.trim()) - 1).filter(i => i >= 0 && i < order.items.length);
+    if (indicesToRemove.length === 0) { await sendWhatsAppText(from, phoneNumberId, `Invalid. Type item number(s) to remove.`); return; }
+    const removedNames = indicesToRemove.map(i => order.items[i].name);
+    const remainingItems = order.items.filter((_, idx) => !indicesToRemove.includes(idx));
+    if (remainingItems.length === 0) { await sendWhatsAppText(from, phoneNumberId, `Cannot remove all items. Use "cancel ${order.orderNumber}".`); return; }
+    editOrder(session.editOrderNumber, { items: remainingItems });
+    const updated = findOrderByNumber(session.editOrderNumber);
+    session.stage = 'edit_reconfirm';
+    (session as any)._revertItems = order.items;
+    (session as any)._revertTotal = previousTotal;
+    let summary = `📋 *Order Updated — Reconfirm?*\n\nRemoved: ${removedNames.join(', ')}\n\n*Previous Total: Rs ${previousTotal.toFixed(2)}*\n\n${updated.items.map((i, idx) => `${idx + 1}. ${i.name} × ${i.quantity} = Rs ${(i.price * i.quantity).toFixed(2)}`).join('\n')}\n\n*New Total: Rs ${updated.total.toFixed(2)}*\n\nReply *"confirm"* or *"cancel"* to revert.`;
+    await sendWhatsAppText(from, phoneNumberId, summary); return;
+  }
+
+  // ── RECONFIRM after edit ────────────────────────────────────────
+  if (session.stage === 'edit_reconfirm') {
+    const order = findOrderByNumber(session.editOrderNumber);
+    if (!order) { session.stage = 'greeting'; session.editOrderNumber = ''; await sendWhatsAppText(from, phoneNumberId, `❌ Order not found.`); return; }
+    if (/^confirm$/i.test(msg) || /^yes$/i.test(msg) || /^ok$/i.test(msg)) {
+      session.stage = 'greeting'; session.editOrderNumber = '';
+      let summary = `✅ *Order Reconfirmed!*\n\nOrder #: *${order.orderNumber}*\n\n`;
+      order.items.forEach((item, i) => { summary += `${i + 1}. ${item.name} × ${item.quantity} = Rs ${(item.price * item.quantity).toFixed(2)}\n`; });
+      summary += `\n*Total: Rs ${order.total.toFixed(2)}*`;
+      summary += `\n\n👤 ${order.customerName} | 📱 ${order.phone}`;
+      summary += `\n🚚 ${order.deliveryType === 'delivery' ? order.address : 'Pickup'}`;
+      summary += `\n\nTrack: "track ${order.orderNumber}"`;
+      await sendWhatsAppText(from, phoneNumberId, summary); return;
+    }
+    if (/^cancel$/i.test(msg) || /^revert$/i.test(msg) || /^no$/i.test(msg)) {
+      const revertItems = (session as any)._revertItems;
+      if (revertItems) editOrder(session.editOrderNumber, { items: revertItems });
+      session.stage = 'greeting'; session.editOrderNumber = '';
+      await sendWhatsAppText(from, phoneNumberId, `↩️ *Reverted!* Order is back to previous state.\n\nTrack: "track ${order.orderNumber}"`); return;
+    }
+    await sendWhatsAppText(from, phoneNumberId, `Reply *"confirm"* to keep changes, or *"cancel"* to revert.`); return;
   }
 
   if (session.stage === 'reschedule_awaiting_time') {
@@ -81,22 +135,31 @@ export async function handleWhatsAppMessage(from: string, message: string, phone
   if (session.stage === 'edit_awaiting_choice') {
     const order = findOrderByNumber(session.editOrderNumber);
     if (!order) { session.stage = 'greeting'; session.editOrderNumber = ''; await sendWhatsAppText(from, phoneNumberId, `❌ Order not found.`); return; }
-    if (lower.includes('item') || lower.includes('1')) {
-      session.stage = 'edit_order_awaiting_items';
-      await sendWhatsAppText(from, phoneNumberId, `📝 *Edit items*\n\nCurrent:\n${order.items.map((i, idx) => `${idx + 1}. ${i.name} × ${i.quantity}`).join('\n')}\n\nType new items:\nExample: "2 ${order.items[0]?.name || 'Panadol 500mg'}, 1 Amoxicillin"`);
+    if (lower.includes('add') || lower.includes('1')) {
+      session.stage = 'edit_add_items';
+      await sendWhatsAppText(from, phoneNumberId,
+        `📝 *Add medicines to ${order.orderNumber}*\n\nCurrent:\n${order.items.map((i, idx) => `${idx + 1}. ${i.name} × ${i.quantity} = Rs ${(i.price * i.quantity).toFixed(2)}`).join('\n')}\n\n*Current Total: Rs ${order.total.toFixed(2)}*\n\nType medicines to ADD:\nExample: "2 Panadol 500mg, 1 Amoxicillin"`);
       return;
     }
-    if (lower.includes('delivery') || lower.includes('address') || lower.includes('2')) {
+    if (lower.includes('remove') || lower.includes('2')) {
+      session.stage = 'edit_remove_items';
+      await sendWhatsAppText(from, phoneNumberId,
+        `🗑️ *Remove items*\n\n${order.items.map((i, idx) => `${idx + 1}. ${i.name} × ${i.quantity}`).join('\n')}\n\nType number(s) to remove:\nExample: "1" or "1, 3"`);
+      return;
+    }
+    if (lower.includes('address') || lower.includes('3')) {
       session.stage = 'edit_awaiting_address';
       await sendWhatsAppText(from, phoneNumberId, `📍 Current: ${order.address}\n\nType new address:`); return;
     }
-    if (lower.includes('pickup') || lower.includes('3')) {
+    if (lower.includes('pickup') || lower.includes('4')) {
+      const previousTotal = order.total;
       editOrder(session.editOrderNumber, { deliveryType: 'pickup' });
       const updated = findOrderByNumber(session.editOrderNumber);
       session.stage = 'greeting'; session.editOrderNumber = '';
-      await sendWhatsAppText(from, phoneNumberId, `✅ Changed to pickup.\n*Total: Rs ${updated.total.toFixed(2)}*`); return;
+      await sendWhatsAppText(from, phoneNumberId, `✅ Changed to pickup.\n\nPrevious: Rs ${previousTotal.toFixed(2)}\nNew: Rs ${updated.total.toFixed(2)}\n\nOrder #: ${updated.orderNumber}`); return;
     }
-    await sendWhatsAppText(from, phoneNumberId, `1️⃣ Items\n2️⃣ Address\n3️⃣ Pickup\n\nType 1, 2, or 3.`); return;
+    await sendWhatsAppText(from, phoneNumberId,
+      `✏️ *Edit ${order.orderNumber}*\n\n1️⃣ Add medicines\n2️⃣ Remove items\n3️⃣ Change address\n4️⃣ Switch to pickup\n\nType 1, 2, 3, or 4.`); return;
   }
 
   if (session.stage === 'edit_awaiting_address') {

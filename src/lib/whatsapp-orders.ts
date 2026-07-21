@@ -56,12 +56,27 @@ export function rescheduleOrder(orderNumber: string, newTime: string): WhatsAppO
   return undefined;
 }
 
-export function editOrder(orderNumber: string, updates: { items?: any[]; address?: string; deliveryType?: string }): WhatsAppOrder | undefined {
+export function editOrder(orderNumber: string, updates: { items?: any[]; addItems?: any[]; address?: string; deliveryType?: string }): WhatsAppOrder | undefined {
   const order = findOrderByNumber(orderNumber);
   if (order) {
     if (updates.items) {
+      // Replace all items
       order.items = updates.items;
       order.subtotal = updates.items.reduce((s: number, i: any) => s + i.price * i.quantity, 0);
+      order.deliveryFee = (updates.deliveryType || order.deliveryType) === 'delivery' ? 20 : 0;
+      order.total = order.subtotal + order.deliveryFee;
+    }
+    if (updates.addItems && updates.addItems.length > 0) {
+      // ADD to existing items — don't replace, merge
+      for (const newItem of updates.addItems) {
+        const existing = order.items.find((i: any) => i.medicineId === newItem.medicineId);
+        if (existing) {
+          existing.quantity += newItem.quantity;
+        } else {
+          order.items.push(newItem);
+        }
+      }
+      order.subtotal = order.items.reduce((s: number, i: any) => s + i.price * i.quantity, 0);
       order.deliveryFee = (updates.deliveryType || order.deliveryType) === 'delivery' ? 20 : 0;
       order.total = order.subtotal + order.deliveryFee;
     }

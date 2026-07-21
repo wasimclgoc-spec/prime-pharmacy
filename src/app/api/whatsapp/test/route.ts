@@ -67,11 +67,16 @@ export async function POST(req: NextRequest) {
     const lower = msg.toLowerCase();
 
     // ── EDIT ORDER FLOW (stages) ──────────────────────────────────────
-    if (session.stage === 'edit_order_awaiting_items') {
+    // ── ADD ITEMS to existing order (merge, don't replace) ──────────
+    if (session.stage === 'edit_add_items') {
       const order = findOrderByNumber(session.editOrderNumber);
       if (!order) { session.stage = 'greeting'; session.editOrderNumber = ''; return NextResponse.json({ reply: `❌ Order not found.` }); }
+
+      const previousTotal = order.total;
+      const previousSubtotal = order.subtotal;
+
       const itemTexts = msg.split(',').map(s => s.trim()).filter(Boolean);
-      const newItems: CartItem[] = [];
+      const addItems: CartItem[] = [];
       let parseError = '';
       for (const itemText of itemTexts) {
         const m = itemText.match(/^(\d+)\s+(.+)$/i);
@@ -79,15 +84,129 @@ export async function POST(req: NextRequest) {
         const qty = parseInt(m[1]);
         const med = findMedicineForOrder(m[2].trim(), medicines);
         if (!med) { parseError = `Not found: ${m[2]}`; break; }
-        newItems.push({ medicineId: med.id, name: med.name, price: med.price, quantity: qty });
+        if (med.stock < qty) { parseError = `Only ${med.stock} units of ${med.name} available`; break; }
+        addItems.push({ medicineId: med.id, name: med.name, price: med.price, quantity: qty });
       }
       if (parseError) return NextResponse.json({ reply: `❌ ${parseError}\n\nTry: "2 Panadol 500mg, 1 Amoxicillin 500mg"` });
-      editOrder(session.editOrderNumber, { items: newItems });
+
+      // ADD items to existing order (merge, don't replace)
+      editOrder(session.editOrderNumber, { addItems });
       const updated = findOrderByNumber(session.editOrderNumber);
-      session.stage = 'greeting'; session.editOrderNumber = '';
-      return NextResponse.json({
-        reply: `✅ *Order Updated!*\n\nOrder #: ${updated.orderNumber}\n${updated.items.map((i, idx) => `${idx + 1}. ${i.name} × ${i.quantity} = Rs ${(i.price * i.quantity).toFixed(2)}`).join('\n')}\n\nSubtotal: Rs ${updated.subtotal.toFixed(2)}\nDelivery: Rs ${updated.deliveryFee}\n*Total: Rs ${updated.total.toFixed(2)}*`
-      });
+      session.stage = 'edit_reconfirm'; // Go to reconfirm stage
+
+      // Show reconfirmation with old vs new amounts
+      let summary = `📋 *Order Updated — Reconfirmation Required*
+
+Order #: *${updated.orderNumber}*
+
+`;
+      summary += `*Previous items:*
+${order.items.map((i, idx) => `${idx + 1}. ${i.name} × ${i.quantity} = Rs ${(i.price * i.quantity).toFixed(2)}`).join('\n')}
+`;
+      summary += `*Previous Total: Rs ${previousTotal.toFixed(2)}*
+
+`;
+      summary += `*Added items:*
+${addItems.map((i, idx) => `+ ${i.name} × ${i.quantity} = Rs ${(i.price * i.quantity).toFixed(2)}`).join('\n')}
+`;
+      summary += `Added Amount: Rs ${addItems.reduce((s, i) => s + i.price * i.quantity, 0).toFixed(2)}
+
+`;
+      summary += `*Updated items:*
+${updated.items.map((i, idx) => `${idx + 1}. ${i.name} × ${i.quantity} = Rs ${(i.price * i.quantity).toFixed(2)}`).join('\n')}
+`;
+      summary += `
+Subtotal: Rs ${updated.subtotal.toFixed(2)}`;
+      summary += `\nDelivery: Rs ${updated.deliveryFee}${updated.deliveryFee === 0 ? ' (Free!)' : ''}`;
+      summary += `\n*New Total: Rs ${updated.total.toFixed(2)}*`;
+      summary += `\n\n👤 ${updated.customerName} | 📱 ${updated.phone}`;
+      summary += `\n🚚 ${updated.deliveryType === 'delivery' ? 'Delivery: ' + updated.address : 'Pickup'}`;
+      summary += `\n💳 ${updated.paymentMethod}`;
+      summary += `\n\nReply *"confirm"* to confirm updated order, or *"cancel"* to revert.`;
+
+      // Store previous state for revert
+      (session as any)._revertItems = order.items;
+      (session as any)._revertSubtotal = previousSubtotal;
+      (session as any)._revertTotal = previousTotal;
+
+      return NextResponse.json({ reply: summary });
+    }
+
+    // ── REMOVE ITEMS from existing order ───────────────────────────
+    if (session.stage === 'edit_remove_items') {
+      const order = findOrderByNumber(session.editOrderNumber);
+      if (!order) { session.stage = 'greeting'; session.editOrderNumber = ''; return NextResponse.json({ reply: `❌ Order not found.` }); }
+
+      const previousTotal = order.total;
+      const indicesToRemove = msg.split(',').map(s => parseInt(s.trim()) - 1).filter(i => i >= 0 && i < order.items.length);
+      if (indicesToRemove.length === 0) return NextResponse.json({ reply: `Invalid selection. Type item number(s) to remove.
+Example: "1" or "1, 3"` });
+
+      const removedNames = indicesToRemove.map(i => order.items[i].name);
+      const remainingItems = order.items.filter((_, idx) => !indicesToRemove.includes(idx));
+
+      if (remainingItems.length === 0) return NextResponse.json({ reply: `❌ Cannot remove all items. Use "cancel ${order.orderNumber}" to cancel the order.` });
+
+      editOrder(session.editOrderNumber, { items: remainingItems });
+      const updated = findOrderByNumber(session.editOrderNumber);
+      session.stage = 'edit_reconfirm';
+      (session as any)._revertItems = order.items;
+      (session as any)._revertTotal = previousTotal;
+
+      let summary = `📋 *Order Updated — Reconfirmation Required*
+
+Order #: *${updated.orderNumber}*
+
+`;
+      summary += `*Removed:* ${removedNames.join(', ')}
+
+`;
+      summary += `*Previous Total: Rs ${previousTotal.toFixed(2)}*
+
+`;
+      summary += `*Updated items:*
+${updated.items.map((i, idx) => `${idx + 1}. ${i.name} × ${i.quantity} = Rs ${(i.price * i.quantity).toFixed(2)}`).join('\n')}
+`;
+      summary += `
+*New Total: Rs ${updated.total.toFixed(2)}*
+`;
+      summary += `\n\nReply *"confirm"* to confirm, or *"cancel"* to revert.`;
+      return NextResponse.json({ reply: summary });
+    }
+
+    // ── RECONFIRM after edit ────────────────────────────────────────
+    if (session.stage === 'edit_reconfirm') {
+      const order = findOrderByNumber(session.editOrderNumber);
+      if (!order) { session.stage = 'greeting'; session.editOrderNumber = ''; return NextResponse.json({ reply: `❌ Order not found.` }); }
+
+      if (/^confirm$/i.test(msg) || /^yes$/i.test(msg) || /^ok$/i.test(msg)) {
+        session.stage = 'greeting'; session.editOrderNumber = '';
+        let summary = `✅ *Order Reconfirmed!*
+
+Order #: *${order.orderNumber}*
+
+`;
+        order.items.forEach((item, i) => { summary += `${i + 1}. ${item.name} × ${item.quantity} = Rs ${(item.price * item.quantity).toFixed(2)}\n`; });
+        summary += `\n*Total: Rs ${order.total.toFixed(2)}*`;
+        summary += `\n\n👤 ${order.customerName} | 📱 ${order.phone}`;
+        summary += `\n🚚 ${order.deliveryType === 'delivery' ? order.address : 'Pickup'}`;
+        summary += `\n💳 ${order.paymentMethod}`;
+        summary += `\n\nTrack: "track ${order.orderNumber}"`;
+        return NextResponse.json({ reply: summary });
+      }
+      if (/^cancel$/i.test(msg) || /^revert$/i.test(msg) || /^no$/i.test(msg)) {
+        // Revert to previous state
+        const revertItems = (session as any)._revertItems;
+        const revertTotal = (session as any)._revertTotal;
+        if (revertItems) {
+          editOrder(session.editOrderNumber, { items: revertItems });
+        }
+        session.stage = 'greeting'; session.editOrderNumber = '';
+        return NextResponse.json({ reply: `↩️ *Reverted!* Order is back to previous state.
+
+Track: "track ${order.orderNumber}"` });
+      }
+      return NextResponse.json({ reply: `Reply *"confirm"* to keep changes, or *"cancel"* to revert.` });
     }
 
     if (session.stage === 'reschedule_awaiting_time') {
