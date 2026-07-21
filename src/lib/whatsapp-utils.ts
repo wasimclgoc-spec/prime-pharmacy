@@ -7,9 +7,11 @@ import { Medicine } from '../types';
 const MEDICINE_ALIASES: Record<string, string[]> = {
   // Pain / Fever
   tylenol:      ['paracetamol', 'acetaminophen'],
+  'tylenol extra': ['acetaminophen', 'paracetamol'],
   panadol:      ['paracetamol'],
   calpol:       ['paracetamol'],
   disprin:      ['aspirin', 'paracetamol'],
+  acetaminophen: ['paracetamol', 'acetaminophen', 'tylenol extra'],
   brufen:       ['ibuprofen'],
   advil:        ['ibuprofen'],
   nurofen:      ['ibuprofen'],
