@@ -327,11 +327,84 @@ Track: "track ${order.orderNumber}"` });
       return NextResponse.json({ reply: `✏️ *Edit ${orderNum}*\n\n1️⃣ Items\n2️⃣ Delivery address\n3️⃣ Switch to pickup\n\nType 1, 2, or 3.` });
     }
 
-    // ── 7. ORDER: quantity + medicine name ───────────────────────────
-    // Skip generic parsers when we're collecting customer info
-    const collectingInfo = ['asking_name','asking_phone','asking_delivery','asking_address','asking_payment','ready_to_checkout'].includes(session.stage);
+    // ── 7. STAGE: asking_name (must be BEFORE orderMatch) ──────────
+    if (session.stage === 'asking_name') {
+      // If the input looks like a medicine order, process it as order (user may have ignored the prompt)
+      const looksLikeOrder = /^(?:(?:i\s+)?(?:need|want|order|would\s+like|give\s+me)\s+)?\d+\s+[a-zA-Z]/i.test(msg);
+      if (!looksLikeOrder) {
+        const name = msg.replace(/[^a-zA-Z\s.'-]/g, '').trim();
+        if (name.length >= 2) {
+          session.name = name.slice(0, 50);
+          session.stage = 'asking_phone';
+          return NextResponse.json({ reply: `Nice to meet you, *${session.name}*! 🙌\n\nPlease share your mobile number:\nExample: "03001234567"` });
+        }
+        return NextResponse.json({ reply: `Please tell me your full name.\nExample: "Ahmed Khan"` });
+      }
+      // Falls through to orderMatch below
+    }
 
-    const orderMatch = !collectingInfo && msg.match(/^(?:(?:i\s+)?(?:need|want|order|would\s+like|give\s+me)\s+)?(\d+)\s+(?:tablets?|capsules?|caps?|pcs?|pieces?|strips?|boxes?|of\s+)*\s*([a-zA-Z].+)$/i);
+    // ── 8. STAGE: asking_phone (must be BEFORE orderMatch) ──────────
+    if (session.stage === 'asking_phone') {
+      const phoneMatch = msg.match(/[\d\s+\-]{8,}/);
+      if (phoneMatch) {
+        session.phone = phoneMatch[0].replace(/\s/g, '');
+        session.stage = 'asking_delivery';
+        return NextResponse.json({
+          reply: `Got it! 📱 \${session.phone}\n\nHow would you like to receive your order?\n\n🚗 *pickup* — Collect from pharmacy (no charge)\n🛵 *delivery* — Home delivery (Rs \${DELIVERY_CHARGE}, free above Rs \${FREE_DELIVERY_THRESHOLD})`
+        });
+      }
+      return NextResponse.json({ reply: `Please send a valid mobile number.\nExample: "03001234567"` });
+    }
+
+    // ── 9. STAGE: asking_delivery ────────────────────────────────────
+    if (session.stage === 'asking_delivery') {
+      if (/delivery|deliver|home|send/i.test(msg)) {
+        session.deliveryType = 'delivery';
+        session.stage = 'asking_address';
+        return NextResponse.json({ reply: `📍 Please share your *delivery address*:` });
+      }
+      if (/pickup|pick up|collect|store/i.test(msg)) {
+        session.deliveryType = 'pickup';
+        session.stage = 'asking_payment';
+        return NextResponse.json({ reply: `💳 *Payment method?*\n\n• *Cash*\n• *Easypaisa*\n• *JazzCash*\n• *Bank Transfer*` });
+      }
+      return NextResponse.json({ reply: `Please type *pickup* or *delivery*.` });
+    }
+
+    // ── 10. STAGE: asking_address ────────────────────────────────────
+    if (session.stage === 'asking_address') {
+      session.address = msg.trim();
+      session.stage = 'asking_payment';
+      return NextResponse.json({ reply: `💳 *Payment method?*\n\n• *Cash*\n• *Easypaisa*\n• *JazzCash*\n• *Bank Transfer*` });
+    }
+
+    // ── 11. STAGE: asking_payment ────────────────────────────────────
+    if (session.stage === 'asking_payment') {
+      const pm = msg.toLowerCase();
+      if (/cash/.test(pm)) { session.paymentMethod = 'Cash'; }
+      else if (/easy|easypaisa/.test(pm)) { session.paymentMethod = 'Easypaisa'; }
+      else if (/jazz/.test(pm)) { session.paymentMethod = 'JazzCash'; }
+      else if (/bank|transfer/.test(pm)) { session.paymentMethod = 'Bank Transfer'; }
+      if (session.paymentMethod) {
+        session.stage = 'ready_to_checkout';
+        const total = cartTotal(session);
+        const deliveryFee = session.deliveryType === 'delivery' && total < FREE_DELIVERY_THRESHOLD ? DELIVERY_CHARGE : 0;
+        const grandTotal = total + deliveryFee;
+        let summary = `✅ *Order Summary*\n\n`;
+        session.cart.forEach(item => { summary += `• \${item.name} × \${item.quantity} = Rs \${(item.price * item.quantity).toFixed(2)}\n`; });
+        summary += `\n💰 Subtotal: Rs \${total.toFixed(2)}`;
+        if (deliveryFee > 0) summary += `\n🛵 Delivery: Rs \${deliveryFee.toFixed(2)}`;
+        summary += `\n💵 *Total: Rs \${grandTotal.toFixed(2)}*`;
+        summary += `\n💳 Payment: \${session.paymentMethod}`;
+        summary += `\n📦 \${session.deliveryType === 'delivery' ? '🛵 Delivery to: ' + session.address : '🚗 Pickup from pharmacy'}`;
+        summary += `\n\nType *confirm* to place your order, or add more medicines.`;
+        return NextResponse.json({ reply: summary });
+      }
+      return NextResponse.json({ reply: `Please choose: *Cash*, *Easypaisa*, *JazzCash*, or *Bank Transfer*` });
+    }
+
+    // ── ORDER: quantity + medicine name ─────────────────────────────
+    const orderMatch = msg.match(/^(?:(?:i\s+)?(?:need|want|order|would\s+like|give\s+me)\s+)?(\d+)\s+(?:tablets?|capsules?|caps?|pcs?|pieces?|strips?|boxes?|of\s+)*\s*([a-zA-Z].+)$/i);
     if (orderMatch) {
       const quantity = parseInt(orderMatch[1]);
       const medName = orderMatch[2].replace(/^of\s+/i, '').trim();
@@ -393,91 +466,6 @@ Track: "track ${order.orderNumber}"` });
           reply: `❌ Sorry, *${medName}* is not available in our pharmacy right now.\n\nYou can:\n• Try a different name or generic name\n• Type a medicine name to search our inventory`
         });
       }
-    }
-
-    // ── 8. STAGE: asking_name ────────────────────────────────────────
-    if (session.stage === 'asking_name') {
-      session.name = msg.replace(/\d+/g, '').trim().slice(0, 50);
-      if (session.name.length < 2) return NextResponse.json({ reply: `Please tell me your full name.\nExample: "Ahmed Khan"` });
-      session.stage = 'asking_phone';
-      return NextResponse.json({ reply: `Nice to meet you, *${session.name}*! 🙌\n\nPlease share your mobile number:\nExample: "03001234567"` });
-    }
-
-    // ── 9. STAGE: asking_phone ───────────────────────────────────────
-    if (session.stage === 'asking_phone') {
-      const phoneMatch = msg.match(/[\d\s+\-]{8,}/);
-      if (phoneMatch) {
-        session.phone = phoneMatch[0].replace(/\s/g, '');
-        session.stage = 'asking_delivery';
-        return NextResponse.json({
-          reply: `Got it! 📱 ${session.phone}\n\nHow would you like to receive your order?\n\n🚗 *pickup* — Collect from pharmacy (no charge)\n🛵 *delivery* — Home delivery (Rs ${DELIVERY_CHARGE}, free above Rs ${FREE_DELIVERY_THRESHOLD})`
-        });
-      }
-      return NextResponse.json({ reply: `Please send a valid mobile number.\nExample: "03001234567"` });
-    }
-
-    // ── 10. STAGE: asking_delivery ───────────────────────────────────
-    if (session.stage === 'asking_delivery') {
-      if (lower.includes('pickup') || lower.includes('collect') || lower.includes('pick')) {
-        session.deliveryType = 'pickup';
-        session.stage = 'asking_payment';
-        const total = cartTotal(session);
-        return NextResponse.json({
-          reply: `🚗 Pickup selected.\n\n🛒 *Order Summary:*\n${session.cart.map((item, i) => `${i + 1}. ${item.name} × ${item.quantity} = Rs ${(item.price * item.quantity).toFixed(2)}`).join('\n')}\n\nSubtotal: Rs ${total.toFixed(2)}\nDelivery: Rs 0\n*Total: Rs ${total.toFixed(2)}*\n\n💳 Payment method?\n• Cash on Pickup\n• Easypaisa\n• JazzCash\n• Bank Transfer`
-        });
-      }
-      if (lower.includes('delivery') || lower.includes('home') || lower.includes('deliver')) {
-        session.deliveryType = 'delivery';
-        session.stage = 'asking_address';
-        return NextResponse.json({
-          reply: `🛵 Delivery selected.\n\nPlease share your full address:\nExample: "House 12, Street 5, Gulberg, Lahore"`
-        });
-      }
-      return NextResponse.json({ reply: `Please type:\n🚗 *pickup* — Collect from pharmacy\n🛵 *delivery* — Home delivery (Rs ${DELIVERY_CHARGE})` });
-    }
-
-    // ── 11. STAGE: asking_address ────────────────────────────────────
-    if (session.stage === 'asking_address') {
-      session.address = msg;
-      session.stage = 'asking_payment';
-      const total = cartTotal(session);
-      const deliveryFee = calcDeliveryFee(total);
-      const grandTotal = total + deliveryFee;
-      return NextResponse.json({
-        reply: `📍 Address saved!\n\n🛒 *Order Summary:*\n${session.cart.map((item, i) => `${i + 1}. ${item.name} × ${item.quantity} = Rs ${(item.price * item.quantity).toFixed(2)}`).join('\n')}\n\nSubtotal: Rs ${total.toFixed(2)}\nDelivery: Rs ${deliveryFee}${deliveryFee === 0 ? ' (Free!)' : ''}\n*Total: Rs ${grandTotal.toFixed(2)}*\n\n💳 Payment method?\n• Cash on Delivery\n• Easypaisa\n• JazzCash\n• Bank Transfer`
-      });
-    }
-
-    // ── 12. STAGE: asking_payment ────────────────────────────────────
-    if (session.stage === 'asking_payment') {
-      const pm = lower;
-      if (pm.includes('cash')) session.paymentMethod = session.deliveryType === 'delivery' ? 'Cash on Delivery' : 'Cash on Pickup';
-      else if (pm.includes('easypaisa')) session.paymentMethod = 'Easypaisa';
-      else if (pm.includes('jazzcash')) session.paymentMethod = 'JazzCash';
-      else if (pm.includes('bank')) session.paymentMethod = 'Bank Transfer';
-      else if (pm.includes('card')) session.paymentMethod = 'Card';
-      else return NextResponse.json({ reply: `Please choose:\n• Cash on ${session.deliveryType === 'delivery' ? 'Delivery' : 'Pickup'}\n• Easypaisa\n• JazzCash\n• Bank Transfer` });
-
-      session.stage = 'ready_to_checkout';
-      const total = cartTotal(session);
-      const deliveryFee = session.deliveryType === 'delivery' ? calcDeliveryFee(total) : 0;
-      const grandTotal = total + deliveryFee;
-
-      let summary = `📋 *Order Summary*\n\n`;
-      session.cart.forEach((item, i) => {
-        summary += `${i + 1}. ${item.name} × ${item.quantity} = Rs ${(item.price * item.quantity).toFixed(2)}\n`;
-      });
-      summary += `\nSubtotal: Rs ${total.toFixed(2)}`;
-      summary += `\nDelivery: Rs ${deliveryFee}${deliveryFee === 0 ? ' (Free!)' : ''}`;
-      summary += `\n*Total: Rs ${grandTotal.toFixed(2)}*`;
-      summary += `\n\n👤 Name: ${session.name}`;
-      summary += `\n📱 Mobile: ${session.phone}`;
-      summary += `\n🚚 Type: ${session.deliveryType === 'delivery' ? 'Delivery' : 'Pickup'}`;
-      if (session.deliveryType === 'delivery') summary += `\n📍 Address: ${session.address}`;
-      summary += `\n💳 Payment: ${session.paymentMethod}`;
-      summary += `\n\nReply *"confirm"* to place this order, or tell me what to change.`;
-
-      return NextResponse.json({ reply: summary });
     }
 
     // ── 13. CONFIRM ORDER ───────────────────────────────────────────
@@ -560,7 +548,7 @@ Track: "track ${order.orderNumber}"` });
     }
 
     // ── 15. MEDICINE SEARCH (no quantity provided) ───────────────────
-    const medResults = !collectingInfo ? searchMedicineByName(msg, medicines) : [];
+    const medResults = searchMedicineByName(msg, medicines);
     if (medResults.length > 0) {
       if (medResults.length === 1) {
         const med = medResults[0];
@@ -577,7 +565,7 @@ Track: "track ${order.orderNumber}"` });
     }
 
     // ── 16. CHECK if medicine exists but out of stock ────────────────
-    const outOfStockMed = !collectingInfo ? findMedicineIncludingOutOfStock(msg, medicines) : null;
+    const outOfStockMed = findMedicineIncludingOutOfStock(msg, medicines);
     if (outOfStockMed) {
       const subs = findSubstitutes(msg, medicines, outOfStockMed.id);
       let reply = `❌ *${outOfStockMed.name}* is currently out of stock.`;
