@@ -121,18 +121,19 @@ const generateMedicines = (suppliers: Supplier[]): Medicine[] => {
       expiryDate = `2027-0${(i % 9) + 1}-20`;
     }
 
-    const cost = parseFloat((Math.random() * 20 + 0.5).toFixed(2));
-    const price = parseFloat((cost * (Math.random() * 1.5 + 1.5)).toFixed(2));
-    
-    let stock = Math.floor(Math.random() * 200) + 50;
+    // Deterministic pricing — same every load, matches WhatsApp inventory
+    const cost  = parseFloat(((i % 20) + 0.5 + (i * 0.37) % 5).toFixed(2));
+    const price = parseFloat((cost * (1.5 + (i % 3) * 0.25)).toFixed(2));
+
+    let stock = (i * 37 + 50) % 200 + 50;
     if (isLowStock) {
-      stock = Math.floor(Math.random() * 5) + 2; // Stock between 2 and 6
+      stock = (i % 5) + 2;
     }
     if (isOut) {
       stock = 0;
     }
 
-    const minStock = Math.floor(Math.random() * 15) + 15; // 15 to 30
+    const minStock = (i % 15) + 15;
 
     meds.push({
       id: `med-${i + 1}`,
