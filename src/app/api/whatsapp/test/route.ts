@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { searchMedicineByName } from '@/lib/whatsapp-utils';
+import { searchMedicineByName, findMedicineForOrder } from '@/lib/whatsapp-utils';
 import { medicines } from '@/lib/whatsapp-inventory';
 import { createOrder, findOrderByNumber, cancelOrder, rescheduleOrder, editOrder, getOrders } from '@/lib/whatsapp-orders';
 
@@ -234,32 +234,44 @@ export async function POST(req: NextRequest) {
     }
 
     // ── 7. ORDER FIRST: "10 Amoxicillin 500mg" ──────────────────────────
-    // Match patterns: "5 Panadol", "I need 5 Panadol", "give me 5 Panadol", "order 5 Panadol"
-    const orderMatch = msg.match(/(?:^|(?:i\s+(?:need|want|order)\s+|give\s+me\s+|order\s+))(\d+)\s+([a-zA-Z].+)$/i);
+    // Match patterns: "5 Panadol", "I need 5 Panadol", "give me 5 Panadol", "order 10 Claritin 500mg"
+    const orderMatch = msg.match(/(?:^|(?:i\s+(?:need|want|order|would\s+like)\s+|give\s+me\s+|order\s+))(\d+)\s+([a-zA-Z].+)$/i);
     if (orderMatch) {
       const quantity = parseInt(orderMatch[1]);
       const medName = orderMatch[2].trim();
-      const results = searchMedicineByName(medName, medicines);
 
-      if (results.length > 0) {
-        const med = results[0];
+      // Directly find best medicine match — no intermediate search screen
+      const med = findMedicineForOrder(medName, medicines);
+
+      if (med) {
+        // Check stock
+        if (med.stock < quantity) {
+          return NextResponse.json({
+            reply: `⚠️ Sorry, only *${med.stock} units* of *${med.name}* are available right now.\n\nWould you like to order ${med.stock} instead? Type "${med.stock} ${med.name}"`
+          });
+        }
         session.cart.push({ medicineId: med.id, name: med.name, price: med.price, quantity });
         const cartTotal = session.cart.reduce((s, i) => s + i.price * i.quantity, 0);
         session.stage = 'ordering';
 
         const rxPrompt = med.prescriptionRequired
-          ? `⚠️ *${med.name}* is a prescription medicine. Please upload your prescription photo (optional but recommended).`
-          : `📎 You can upload a prescription if you have one (optional).`;
+          ? `⚠️ *${med.name}* requires a prescription. Please upload your prescription photo (optional but recommended).`
+          : `📎 Upload a prescription if you have one (optional).`;
 
         if (!session.name) {
           session.stage = 'asking_name';
           return NextResponse.json({
-            reply: `✅ Added to cart:\n*${med.name}* × ${quantity}\n   Rs ${med.price.toFixed(2)}/tablet × ${quantity} = Rs ${(med.price * quantity).toFixed(2)}\n\n🛒 *Cart Total: Rs ${cartTotal.toFixed(2)}*\n\n${rxPrompt}\n\nTo continue, please tell me your *full name*:\nExample: "Ahmed Khan"`
+            reply: `✅ Added to cart:\n*${med.name}* × ${quantity} = Rs ${(med.price * quantity).toFixed(2)}\n(Rs ${med.price.toFixed(2)}/tablet)\n\n🛒 Cart Total: Rs ${cartTotal.toFixed(2)}\n\n${rxPrompt}\n\nPlease tell me your *full name*:\nExample: "Ahmed Khan"`
           });
         }
 
         return NextResponse.json({
-          reply: `✅ Added to cart:\n*${med.name}* × ${quantity}\n   Rs ${med.price.toFixed(2)}/tablet × ${quantity} = Rs ${(med.price * quantity).toFixed(2)}\n\n🛒 *Cart Total: Rs ${cartTotal.toFixed(2)}*\n\n${rxPrompt}\n\nType "confirm order" to checkout, or add more medicines.`
+          reply: `✅ Added to cart:\n*${med.name}* × ${quantity} = Rs ${(med.price * quantity).toFixed(2)}\n(Rs ${med.price.toFixed(2)}/tablet)\n\n🛒 Cart Total: Rs ${cartTotal.toFixed(2)}\n\n${rxPrompt}\n\nAdd more medicines or type "confirm order" to checkout.`
+        });
+      } else {
+        // Medicine not found in inventory
+        return NextResponse.json({
+          reply: `❌ Sorry, *${medName}* is not available in our pharmacy right now.\n\nYou can:\n• Try searching by generic name\n• Contact us for special orders\n\nType a medicine name to search our inventory.`
         });
       }
     }

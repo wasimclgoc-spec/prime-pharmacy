@@ -1,4 +1,4 @@
-import { searchMedicineByName } from './whatsapp-utils';
+import { searchMedicineByName, findMedicineForOrder } from './whatsapp-utils';
 import { medicines } from './whatsapp-inventory';
 import { sendWhatsAppText } from './whatsapp-client';
 import { createOrder, findOrderByNumber, cancelOrder, rescheduleOrder, editOrder } from './whatsapp-orders';
@@ -202,8 +202,8 @@ export async function handleWhatsAppMessage(from: string, message: string, phone
   }
 
   // ── 7. ORDER FIRST: "10 Amoxicillin 500mg" ─────────────────────────
-  // Match patterns: "5 Panadol", "I need 5 Panadol", "give me 5 Panadol", "order 5 Panadol"
-    const orderMatch = msg.match(/(?:^|(?:i\s+(?:need|want|order)\s+|give\s+me\s+|order\s+))(\d+)\s+([a-zA-Z].+)$/i);
+  // Match patterns: "5 Panadol", "I need 5 Panadol", "give me 5 Panadol", "order 10 Claritin 500mg"
+    const orderMatch = msg.match(/(?:^|(?:i\s+(?:need|want|order|would\s+like)\s+|give\s+me\s+|order\s+))(\d+)\s+([a-zA-Z].+)$/i);
   if (orderMatch) {
     const quantity = parseInt(orderMatch[1]);
     const medName = orderMatch[2].trim();
