@@ -1,33 +1,38 @@
-import { searchMedicineByName, findMedicineForOrder } from './whatsapp-utils';
+import { searchMedicineByName, findMedicineForOrder, findSubstitutes, findMedicineIncludingOutOfStock } from './whatsapp-utils';
 import { medicines } from './whatsapp-inventory';
 import { sendWhatsAppText } from './whatsapp-client';
 import { createOrder, findOrderByNumber, cancelOrder, rescheduleOrder, editOrder } from './whatsapp-orders';
+import { PHARMACY_KB } from './ai-knowledge-base';
 
 interface CartItem { medicineId: string; name: string; price: number; quantity: number }
 interface WhatsAppSession {
-  name: string;
-  phone: string;
-  address: string;
-  deliveryType: string;
-  cart: CartItem[];
-  stage: string;
-  lastActivity: number;
-  editOrderNumber: string;
+  name: string; phone: string; address: string; deliveryType: string;
+  cart: CartItem[]; stage: string; lastActivity: number;
+  editOrderNumber: string; paymentMethod: string;
 }
 
 const DELIVERY_CHARGE = 20;
+const FREE_DELIVERY_THRESHOLD = 1000;
 const sessions = new Map<string, WhatsAppSession>();
 
 function getSession(from: string): WhatsAppSession {
   let session = sessions.get(from);
   if (!session) {
-    session = { name: '', phone: '', address: '', deliveryType: '', cart: [], stage: 'greeting', lastActivity: Date.now(), editOrderNumber: '' };
+    session = { name: '', phone: '', address: '', deliveryType: '', cart: [], stage: 'greeting', lastActivity: Date.now(), editOrderNumber: '', paymentMethod: '' };
     sessions.set(from, session);
   }
   session.lastActivity = Date.now();
   return session;
 }
 
+function cartTotal(session: WhatsAppSession): number {
+  return session.cart.reduce((s, i) => s + i.price * i.quantity, 0);
+}
+function calcDeliveryFee(subtotal: number): number {
+  return subtotal >= FREE_DELIVERY_THRESHOLD ? 0 : DELIVERY_CHARGE;
+}
+
+// Auto-cleanup inactive sessions
 setInterval(() => {
   const now = Date.now();
   for (const [key, session] of sessions.entries()) {
@@ -40,7 +45,7 @@ export async function handleWhatsAppMessage(from: string, message: string, phone
   const msg = message.trim();
   const lower = msg.toLowerCase();
 
-  // ── STAGE: edit_order_awaiting_items ─────────────────────────────
+  // ── EDIT FLOW ─────────────────────────────────────────────────────
   if (session.stage === 'edit_order_awaiting_items') {
     const order = findOrderByNumber(session.editOrderNumber);
     if (!order) { session.stage = 'greeting'; session.editOrderNumber = ''; await sendWhatsAppText(from, phoneNumberId, `❌ Order not found.`); return; }
@@ -51,274 +56,332 @@ export async function handleWhatsAppMessage(from: string, message: string, phone
       const m = itemText.match(/^(\d+)\s+(.+)$/i);
       if (!m) { parseError = 'Format: "2 Panadol 500mg, 1 Amoxicillin"'; break; }
       const qty = parseInt(m[1]);
-      const results = searchMedicineByName(m[2].trim(), medicines);
-      if (results.length === 0) { parseError = `Medicine not found: ${m[2]}`; break; }
-      newItems.push({ medicineId: results[0].id, name: results[0].name, price: results[0].price, quantity: qty });
+      const med = findMedicineForOrder(m[2].trim(), medicines);
+      if (!med) { parseError = `Not found: ${m[2]}`; break; }
+      newItems.push({ medicineId: med.id, name: med.name, price: med.price, quantity: qty });
     }
-    if (parseError) { await sendWhatsAppText(from, phoneNumberId, `❌ ${parseError}\n\nTry again. Format: "2 Panadol 500mg, 1 Amoxicillin 500mg"`); return; }
+    if (parseError) { await sendWhatsAppText(from, phoneNumberId, `❌ ${parseError}\n\nTry: "2 Panadol 500mg, 1 Amoxicillin 500mg"`); return; }
     editOrder(session.editOrderNumber, { items: newItems });
     const updated = findOrderByNumber(session.editOrderNumber);
     session.stage = 'greeting'; session.editOrderNumber = '';
     await sendWhatsAppText(from, phoneNumberId,
-      `✅ *Order Updated!*\n\nOrder #: ${updated.orderNumber}\nItems:\n${updated.items.map((i, idx) => `${idx + 1}. ${i.name} × ${i.quantity} = Rs ${(i.price * i.quantity).toFixed(2)}`).join('\n')}\n\nSubtotal: Rs ${updated.subtotal.toFixed(2)}\nDelivery: Rs ${updated.deliveryFee}\n*Total: Rs ${updated.total.toFixed(2)}*`);
+      `✅ *Order Updated!*\n\n${updated.items.map((i, idx) => `${idx + 1}. ${i.name} × ${i.quantity} = Rs ${(i.price * i.quantity).toFixed(2)}`).join('\n')}\n\n*Total: Rs ${updated.total.toFixed(2)}*`);
     return;
   }
 
-  // ── STAGE: reschedule_awaiting_time ───────────────────────────────
   if (session.stage === 'reschedule_awaiting_time') {
     const order = findOrderByNumber(session.editOrderNumber);
     if (!order) { session.stage = 'greeting'; session.editOrderNumber = ''; await sendWhatsAppText(from, phoneNumberId, `❌ Order not found.`); return; }
     rescheduleOrder(session.editOrderNumber, msg);
     session.stage = 'greeting'; session.editOrderNumber = '';
-    await sendWhatsAppText(from, phoneNumberId,
-      `✅ *Order Rescheduled!*\n\nOrder #: ${order.orderNumber}\nNew time: *${msg}*\n\nWe'll prepare your order for the new time.`);
+    await sendWhatsAppText(from, phoneNumberId, `✅ *Order Rescheduled!*\n\nOrder #: ${order.orderNumber}\nNew time: *${msg}*`);
     return;
   }
 
-  // ── STAGE: edit_awaiting_choice ──────────────────────────────────
   if (session.stage === 'edit_awaiting_choice') {
     const order = findOrderByNumber(session.editOrderNumber);
     if (!order) { session.stage = 'greeting'; session.editOrderNumber = ''; await sendWhatsAppText(from, phoneNumberId, `❌ Order not found.`); return; }
-    if (lower.includes('item') || lower.includes('medicine') || lower.includes('1')) {
+    if (lower.includes('item') || lower.includes('1')) {
       session.stage = 'edit_order_awaiting_items';
-      await sendWhatsAppText(from, phoneNumberId,
-        `📝 *Edit items for ${order.orderNumber}*\n\nCurrent items:\n${order.items.map((i, idx) => `${idx + 1}. ${i.name} × ${i.quantity}`).join('\n')}\n\nType new items (comma separated):\nExample: "2 ${order.items[0]?.name || 'Panadol 500mg'}, 1 Amoxicillin 500mg"`);
+      await sendWhatsAppText(from, phoneNumberId, `📝 *Edit items*\n\nCurrent:\n${order.items.map((i, idx) => `${idx + 1}. ${i.name} × ${i.quantity}`).join('\n')}\n\nType new items:\nExample: "2 ${order.items[0]?.name || 'Panadol 500mg'}, 1 Amoxicillin"`);
       return;
     }
     if (lower.includes('delivery') || lower.includes('address') || lower.includes('2')) {
-      if (order.deliveryType === 'delivery') {
-        session.stage = 'edit_awaiting_address';
-        await sendWhatsAppText(from, phoneNumberId, `📍 Current address: ${order.address}\n\nType new delivery address:`); return;
-      } else {
-        editOrder(session.editOrderNumber, { deliveryType: 'delivery' });
-        session.stage = 'edit_awaiting_address';
-        await sendWhatsAppText(from, phoneNumberId, `🛵 Switched to delivery (Rs ${DELIVERY_CHARGE} charges).\n\nType delivery address:`); return;
-      }
+      session.stage = 'edit_awaiting_address';
+      await sendWhatsAppText(from, phoneNumberId, `📍 Current: ${order.address}\n\nType new address:`); return;
     }
     if (lower.includes('pickup') || lower.includes('3')) {
       editOrder(session.editOrderNumber, { deliveryType: 'pickup' });
       const updated = findOrderByNumber(session.editOrderNumber);
       session.stage = 'greeting'; session.editOrderNumber = '';
-      await sendWhatsAppText(from, phoneNumberId,
-        `✅ *Order Updated!*\n\nOrder #: ${updated.orderNumber}\nChanged to pickup (no delivery charges)\n*Total: Rs ${updated.total.toFixed(2)}*`);
-      return;
+      await sendWhatsAppText(from, phoneNumberId, `✅ Changed to pickup.\n*Total: Rs ${updated.total.toFixed(2)}*`); return;
     }
-    await sendWhatsAppText(from, phoneNumberId, `What would you like to edit?\n1️⃣ Items\n2️⃣ Delivery address\n3️⃣ Switch to pickup\n\nType 1, 2, or 3.`);
-    return;
+    await sendWhatsAppText(from, phoneNumberId, `1️⃣ Items\n2️⃣ Address\n3️⃣ Pickup\n\nType 1, 2, or 3.`); return;
   }
 
-  // ── STAGE: edit_awaiting_address ──────────────────────────────────
   if (session.stage === 'edit_awaiting_address') {
     editOrder(session.editOrderNumber, { address: msg });
     const updated = findOrderByNumber(session.editOrderNumber);
     session.stage = 'greeting'; session.editOrderNumber = '';
-    await sendWhatsAppText(from, phoneNumberId,
-      `✅ *Order Updated!*\n\nOrder #: ${updated.orderNumber}\nNew address: ${updated.address}\n*Total: Rs ${updated.total.toFixed(2)}*`);
-    return;
+    await sendWhatsAppText(from, phoneNumberId, `✅ Address updated!\n*Total: Rs ${updated.total.toFixed(2)}*`); return;
   }
 
-  // ── 1. GREETING ────────────────────────────────────────────────────
-  const isGreeting = /^(hi|hello|hey|salam|salaam|start|assalam|good morning|good evening|good afternoon)[\s!.]*$/i.test(msg);
+  // ── 1. GREETING ───────────────────────────────────────────────────
+  const isGreeting = /^(hi|hello|hey|salam|salaam|start|assalam|good morning|good evening|good afternoon|marhaba)[\s!.]*$/i.test(msg);
   if (isGreeting) {
-    Object.assign(session, { name: '', phone: '', address: '', deliveryType: '', cart: [], stage: 'greeting', editOrderNumber: '' });
+    Object.assign(session, { name: '', phone: '', address: '', deliveryType: '', cart: [], stage: 'greeting', editOrderNumber: '', paymentMethod: '' });
     await sendWhatsAppText(from, phoneNumberId,
       `👋 Welcome to Prime Pharmacy!\n\nType medicine name + quantity to order.\nExample: "5 Glucophage" or "I need 10 Panadol 500mg"\n\nOr type a medicine name to search.`);
     return;
   }
 
-  // ── 2. IMAGE → prescription ───────────────────────────────────────
+  // ── 2. PRESCRIPTION IMAGE ─────────────────────────────────────────
   if (msg.includes('[IMAGE]') || msg.includes('[IMAGE_RECEIVED]')) {
-    await sendWhatsAppText(from, phoneNumberId, `✅ Prescription received! Our pharmacist will review it.\n\nNow type a medicine name to search or add to cart.`);
+    await sendWhatsAppText(from, phoneNumberId, `✅ Prescription received! Our pharmacist will verify it before dispatch.\n\nContinue ordering — type medicine name + quantity.`);
     return;
   }
 
-  // ── 3. TRACK ORDER ─────────────────────────────────────────────────
-  if (lower.startsWith('track') || lower.startsWith('order ') || /^ord-/i.test(msg)) {
-    const orderNum = msg.replace(/^(track|order|order\s+no|order\s+#)\s*/i, '').trim().toUpperCase() || msg.toUpperCase();
+  // ── 3. TRACK ORDER ────────────────────────────────────────────────
+  if (lower.startsWith('track') || /^ord-/i.test(msg)) {
+    const orderNum = msg.replace(/^track\s*/i, '').trim().toUpperCase();
     const order = findOrderByNumber(orderNum);
     if (order) {
-      let summary = `📦 *Order Status*\n\nOrder #: *${order.orderNumber}*\nStatus: *${order.status}*\nPayment: ${order.paymentStatus}\n\nItems:\n`;
+      let summary = `📦 *Order Status*\n\nOrder #: *${order.orderNumber}*\nStatus: *${order.status}*\nPayment: ${order.paymentStatus}\n\n`;
       order.items.forEach((item, i) => { summary += `${i + 1}. ${item.name} × ${item.quantity} = Rs ${(item.price * item.quantity).toFixed(2)}\n`; });
-      summary += `\nSubtotal: Rs ${order.subtotal.toFixed(2)}`;
-      if (order.deliveryFee > 0) summary += `\nDelivery: Rs ${order.deliveryFee}`;
       summary += `\n*Total: Rs ${order.total.toFixed(2)}*`;
       summary += `\n\n👤 ${order.customerName}\n📱 ${order.phone}`;
       if (order.deliveryType === 'delivery') summary += `\n🛵 ${order.address}`; else summary += `\n🚗 Pickup`;
-      if (order.notes) summary += `\n📝 ${order.notes}`;
       if (order.status !== 'Delivered' && order.status !== 'Cancelled') {
-        summary += `\n\nAvailable actions:\n❌ "cancel ${order.orderNumber}"\n🔄 "reschedule ${order.orderNumber}"\n✏️ "edit ${order.orderNumber}"`;
+        summary += `\n\n❌ "cancel ${order.orderNumber}"\n🔄 "reschedule ${order.orderNumber}"\n✏️ "edit ${order.orderNumber}"`;
       }
       await sendWhatsAppText(from, phoneNumberId, summary); return;
     }
-    await sendWhatsAppText(from, phoneNumberId, `❌ Order not found. Please check your order number.\nExample: "track ORD-12345"`);
-    return;
+    await sendWhatsAppText(from, phoneNumberId, `❌ Order not found.\nExample: "track ORD-12345"`); return;
   }
 
-  // ── 4. CANCEL ORDER ───────────────────────────────────────────────
+  // ── 4. CANCEL ─────────────────────────────────────────────────────
   if (lower.startsWith('cancel')) {
     const orderNum = msg.replace(/^cancel\s+/i, '').trim().toUpperCase();
     if (!orderNum) { await sendWhatsAppText(from, phoneNumberId, `Type: "cancel ORD-XXXXX"`); return; }
     const order = findOrderByNumber(orderNum);
     if (!order) { await sendWhatsAppText(from, phoneNumberId, `❌ Order ${orderNum} not found.`); return; }
     if (order.status === 'Delivered') { await sendWhatsAppText(from, phoneNumberId, `❌ Cannot cancel a delivered order.`); return; }
-    if (order.status === 'Cancelled') { await sendWhatsAppText(from, phoneNumberId, `This order is already cancelled.`); return; }
+    if (order.status === 'Cancelled') { await sendWhatsAppText(from, phoneNumberId, `Already cancelled.`); return; }
     cancelOrder(orderNum);
-    const updated = findOrderByNumber(orderNum);
-    await sendWhatsAppText(from, phoneNumberId,
-      `✅ *Order Cancelled!*\n\nOrder #: ${updated.orderNumber}\nStatus: ${updated.status}\nRefund: ${updated.paymentStatus}\n\nType "hi" to start a new order.`);
+    await sendWhatsAppText(from, phoneNumberId, `✅ *Order Cancelled!*\n\nOrder #: ${orderNum}\nRefund: ${order.paymentStatus}\n\nType "hi" to start a new order.`);
     return;
   }
 
-  // ── 5. RESCHEDULE ORDER ───────────────────────────────────────────
+  // ── 5. RESCHEDULE ─────────────────────────────────────────────────
   if (lower.startsWith('reschedule')) {
     const orderNum = msg.replace(/^reschedule\s+/i, '').trim().toUpperCase();
     if (!orderNum) { await sendWhatsAppText(from, phoneNumberId, `Type: "reschedule ORD-XXXXX"`); return; }
     const order = findOrderByNumber(orderNum);
     if (!order) { await sendWhatsAppText(from, phoneNumberId, `❌ Order ${orderNum} not found.`); return; }
-    if (order.status === 'Delivered' || order.status === 'Cancelled') {
-      await sendWhatsAppText(from, phoneNumberId, `❌ Cannot reschedule a ${order.status.toLowerCase()} order.`); return;
-    }
-    session.editOrderNumber = orderNum;
-    session.stage = 'reschedule_awaiting_time';
-    await sendWhatsAppText(from, phoneNumberId,
-      `🔄 *Reschedule ${orderNum}*\n\nWhen would you like it?\nExample: "Tomorrow 3pm" or "26 July 10am"`);
+    if (order.status === 'Delivered' || order.status === 'Cancelled') { await sendWhatsAppText(from, phoneNumberId, `❌ Cannot reschedule.`); return; }
+    session.editOrderNumber = orderNum; session.stage = 'reschedule_awaiting_time';
+    await sendWhatsAppText(from, phoneNumberId, `🔄 *Reschedule ${orderNum}*\n\nWhen?\nExample: "Tomorrow 3pm"`);
     return;
   }
 
-  // ── 6. EDIT ORDER ─────────────────────────────────────────────────
+  // ── 6. EDIT ───────────────────────────────────────────────────────
   if (lower.startsWith('edit')) {
     const orderNum = msg.replace(/^edit\s+/i, '').trim().toUpperCase();
     if (!orderNum) { await sendWhatsAppText(from, phoneNumberId, `Type: "edit ORD-XXXXX"`); return; }
     const order = findOrderByNumber(orderNum);
     if (!order) { await sendWhatsAppText(from, phoneNumberId, `❌ Order ${orderNum} not found.`); return; }
-    if (order.status === 'Delivered' || order.status === 'Cancelled') {
-      await sendWhatsAppText(from, phoneNumberId, `❌ Cannot edit a ${order.status.toLowerCase()} order.`); return;
-    }
-    session.editOrderNumber = orderNum;
-    session.stage = 'edit_awaiting_choice';
-    await sendWhatsAppText(from, phoneNumberId,
-      `✏️ *Edit ${orderNum}*\n\nWhat would you like to change?\n1️⃣ Items (add/remove medicines)\n2️⃣ Delivery address\n3️⃣ Switch to pickup (no charges)\n\nType 1, 2, or 3.`);
+    if (order.status === 'Delivered' || order.status === 'Cancelled') { await sendWhatsAppText(from, phoneNumberId, `❌ Cannot edit.`); return; }
+    session.editOrderNumber = orderNum; session.stage = 'edit_awaiting_choice';
+    await sendWhatsAppText(from, phoneNumberId, `✏️ *Edit ${orderNum}*\n\n1️⃣ Items\n2️⃣ Address\n3️⃣ Pickup\n\nType 1, 2, or 3.`);
     return;
   }
 
-  // ── 7. ORDER FIRST: "10 Amoxicillin 500mg" ─────────────────────────
-  // Match patterns: "5 Panadol", "I need 5 Panadol", "give me 5 Panadol", "order 10 Claritin 500mg"
-    const orderMatch = msg.match(/(?:^|(?:i\s+(?:need|want|order|would\s+like)\s+|give\s+me\s+|order\s+))(\d+)\s+([a-zA-Z].+)$/i);
+  // ── 7. ORDER: quantity + medicine name ────────────────────────────
+  const orderMatch = msg.match(/^(?:(?:i\s+)?(?:need|want|order|would\s+like|give\s+me)\s+)?(\d+)\s+(?:tablets?|capsules?|caps?|pcs?|pieces?|strips?|boxes?|of\s+)*\s*([a-zA-Z].+)$/i);
   if (orderMatch) {
     const quantity = parseInt(orderMatch[1]);
-    const medName = orderMatch[2].trim();
-    const results = searchMedicineByName(medName, medicines);
-    if (results.length > 0) {
-      const med = results[0];
+    const medName = orderMatch[2].replace(/^of\s+/i, '').trim();
+    const med = findMedicineForOrder(medName, medicines);
+
+    if (med) {
+      if (med.stock < quantity) {
+        const subs = findSubstitutes(medName, medicines, med.id);
+        let reply = `⚠️ Only *${med.stock} units* of *${med.name}* available.\n\nWould you like ${med.stock} instead? Type "${med.stock} ${med.name}"`;
+        if (subs.length > 0) {
+          reply += `\n\nAlternatives:`;
+          subs.forEach((s, i) => { reply += `\n${i + 1}. ${s.name} — Rs ${s.price.toFixed(2)} (${s.stock} in stock)`; });
+        }
+        await sendWhatsAppText(from, phoneNumberId, reply); return;
+      }
+
       session.cart.push({ medicineId: med.id, name: med.name, price: med.price, quantity });
-      const cartTotal = session.cart.reduce((s, i) => s + i.price * i.quantity, 0);
-      const rxPrompt = med.prescriptionRequired
-        ? `⚠️ *${med.name}* is a prescription medicine. Please upload your prescription photo (optional but recommended).`
-        : `📎 You can upload a prescription if you have one (optional).`;
+      const total = cartTotal(session);
+      session.stage = 'ordering';
+
+      const rxNote = med.prescriptionRequired
+        ? `⚠️ *${med.name}* requires prescription. Upload a photo or the order will be held for pharmacist review.`
+        : '';
+
       if (!session.name) {
         session.stage = 'asking_name';
         await sendWhatsAppText(from, phoneNumberId,
-          `✅ Added to cart:\n*${med.name}* × ${quantity}\n   Rs ${med.price.toFixed(2)}/tablet × ${quantity} = Rs ${(med.price * quantity).toFixed(2)}\n\n🛒 *Cart Total: Rs ${cartTotal.toFixed(2)}*\n\n${rxPrompt}\n\nTo continue, please tell me your *full name*:\nExample: "Ahmed Khan"`);
+          `✅ *${med.name}* × ${quantity}\n💰 Rs ${med.price.toFixed(2)}/tablet × ${quantity} = *Rs ${(med.price * quantity).toFixed(2)}*\n\n🛒 Cart: Rs ${total.toFixed(2)}\n${rxNote ? rxNote + '\n\n' : ''}Please tell me your *full name*:`);
         return;
       }
+
       await sendWhatsAppText(from, phoneNumberId,
-        `✅ Added to cart:\n*${med.name}* × ${quantity}\n   Rs ${med.price.toFixed(2)}/tablet × ${quantity} = Rs ${(med.price * quantity).toFixed(2)}\n\n🛒 *Cart Total: Rs ${cartTotal.toFixed(2)}*\n\n${rxPrompt}\n\nType "confirm order" to checkout, or add more medicines.`);
+        `✅ *${med.name}* × ${quantity} = Rs ${(med.price * quantity).toFixed(2)}\n🛒 Cart: Rs ${total.toFixed(2)}\n${rxNote ? '\n' + rxNote : ''}\n\nAdd more or type "confirm order" to checkout.`);
+      return;
+    } else {
+      const outOfStockMed = findMedicineIncludingOutOfStock(medName, medicines);
+      if (outOfStockMed) {
+        const subs = findSubstitutes(medName, medicines, outOfStockMed.id);
+        let reply = `❌ *${outOfStockMed.name}* is out of stock.`;
+        if (subs.length > 0) {
+          reply += `\n\nAlternatives:`;
+          subs.forEach((s, i) => { reply += `\n${i + 1}. ${s.name} — Rs ${s.price.toFixed(2)}/tablet ✅`; });
+          reply += `\n\nType quantity + name to order.`;
+        } else { reply += `\n\nNo alternatives available.`; }
+        await sendWhatsAppText(from, phoneNumberId, reply); return;
+      }
+
+      await sendWhatsAppText(from, phoneNumberId,
+        `❌ Sorry, *${medName}* is not available right now.\n\nTry a different name or generic name.`);
       return;
     }
   }
 
-  // ── 8. STAGE: asking_name ─────────────────────────────────────────
+  // ── 8. ASKING NAME ────────────────────────────────────────────────
   if (session.stage === 'asking_name') {
-    session.name = msg; session.stage = 'asking_phone';
-    await sendWhatsAppText(from, phoneNumberId, `Nice to meet you, *${session.name}*! 🙌\n\nPlease share your mobile number:\nExample: "03001234567"`); return;
+    session.name = msg.replace(/\d+/g, '').trim().slice(0, 50);
+    if (session.name.length < 2) { await sendWhatsAppText(from, phoneNumberId, `Please tell me your full name.`); return; }
+    session.stage = 'asking_phone';
+    await sendWhatsAppText(from, phoneNumberId, `Nice to meet you, *${session.name}*! 🙌\n\nPlease share your mobile number:`); return;
   }
 
-  // ── 9. STAGE: asking_phone ────────────────────────────────────────
+  // ── 9. ASKING PHONE ───────────────────────────────────────────────
   if (session.stage === 'asking_phone') {
     const phoneMatch = msg.match(/[\d\s+\-]{8,}/);
     if (phoneMatch) {
-      session.phone = phoneMatch[0].replace(/\s/g, ''); session.stage = 'asking_delivery';
+      session.phone = phoneMatch[0].replace(/\s/g, '');
+      session.stage = 'asking_delivery';
       await sendWhatsAppText(from, phoneNumberId,
-        `Got it! 📱 ${session.phone}\n\nHow would you like to receive your order?\n\nType:\n🚗 *pickup* — Collect from pharmacy (no charge)\n🛵 *delivery* — Home delivery (Rs ${DELIVERY_CHARGE} charges)`); return;
+        `📱 ${session.phone}\n\n🚗 *pickup* (no charge)\n🛵 *delivery* (Rs ${DELIVERY_CHARGE}, free above Rs ${FREE_DELIVERY_THRESHOLD})`); return;
     }
-    await sendWhatsAppText(from, phoneNumberId, `Please send a valid mobile number.\nExample: "03001234567"`); return;
+    await sendWhatsAppText(from, phoneNumberId, `Please send a valid mobile number.`); return;
   }
 
-  // ── 10. STAGE: asking_delivery ────────────────────────────────────
+  // ── 10. ASKING DELIVERY ───────────────────────────────────────────
   if (session.stage === 'asking_delivery') {
     if (lower.includes('pickup') || lower.includes('collect') || lower.includes('pick')) {
-      session.deliveryType = 'pickup'; session.stage = 'ready_to_checkout';
-      const cartTotal = session.cart.reduce((s, i) => s + i.price * i.quantity, 0);
+      session.deliveryType = 'pickup'; session.stage = 'asking_payment';
+      const total = cartTotal(session);
       await sendWhatsAppText(from, phoneNumberId,
-        `🚗 Pickup selected — no delivery charges.\n\n🛒 *Order Summary:*\n${session.cart.map((item, i) => `${i + 1}. ${item.name} × ${item.quantity} = Rs ${(item.price * item.quantity).toFixed(2)}`).join('\n')}\n\nSubtotal: Rs ${cartTotal.toFixed(2)}\nDelivery: Rs 0\n*Total: Rs ${cartTotal.toFixed(2)}*\n\nType "confirm order" to place your order.`); return;
+        `🚗 Pickup selected.\n\nSubtotal: Rs ${total.toFixed(2)}\nDelivery: Rs 0\n*Total: Rs ${total.toFixed(2)}*\n\n💳 Payment?\n• Cash on Pickup\n• Easypaisa\n• JazzCash\n• Bank Transfer`); return;
     }
     if (lower.includes('delivery') || lower.includes('home') || lower.includes('deliver')) {
       session.deliveryType = 'delivery'; session.stage = 'asking_address';
-      await sendWhatsAppText(from, phoneNumberId,
-        `🛵 Delivery selected — Rs ${DELIVERY_CHARGE} charges.\n\nPlease share your delivery address:\nExample: "House 12, Street 5, Gulberg, Lahore"`); return;
+      await sendWhatsAppText(from, phoneNumberId, `🛵 Delivery selected.\n\nPlease share your full address:`); return;
     }
-    await sendWhatsAppText(from, phoneNumberId, `Please type:\n🚗 *pickup* — Collect from pharmacy (no charge)\n🛵 *delivery* — Home delivery (Rs ${DELIVERY_CHARGE} charges)`); return;
+    await sendWhatsAppText(from, phoneNumberId, `🚗 *pickup* or 🛵 *delivery*?`); return;
   }
 
-  // ── 11. STAGE: asking_address ─────────────────────────────────────
+  // ── 11. ASKING ADDRESS ────────────────────────────────────────────
   if (session.stage === 'asking_address') {
-    session.address = msg; session.stage = 'ready_to_checkout';
-    const cartTotal = session.cart.reduce((s, i) => s + i.price * i.quantity, 0);
-    const grandTotal = cartTotal + DELIVERY_CHARGE;
+    session.address = msg; session.stage = 'asking_payment';
+    const total = cartTotal(session);
+    const deliveryFee = calcDeliveryFee(total);
+    const grandTotal = total + deliveryFee;
     await sendWhatsAppText(from, phoneNumberId,
-      `📍 Address saved!\n\n🛒 *Order Summary:*\n${session.cart.map((item, i) => `${i + 1}. ${item.name} × ${item.quantity} = Rs ${(item.price * item.quantity).toFixed(2)}`).join('\n')}\n\nSubtotal: Rs ${cartTotal.toFixed(2)}\nDelivery: Rs ${DELIVERY_CHARGE}\n*Total: Rs ${grandTotal.toFixed(2)}*\n\nType "confirm order" to place your order.`); return;
+      `📍 Saved!\n\nSubtotal: Rs ${total.toFixed(2)}\nDelivery: Rs ${deliveryFee}${deliveryFee === 0 ? ' (Free!)' : ''}\n*Total: Rs ${grandTotal.toFixed(2)}*\n\n💳 Payment?\n• Cash on Delivery\n• Easypaisa\n• JazzCash\n• Bank Transfer`); return;
   }
 
-  // ── 12. CONFIRM ORDER ─────────────────────────────────────────────
-  if (/confirm|place order|checkout/i.test(msg) && session.cart.length > 0) {
-    if (!session.name) { session.stage = 'asking_name'; await sendWhatsAppText(from, phoneNumberId, `Let's complete your order! 📝\n\nPlease tell me your *full name*:`); return; }
-    if (!session.phone) { session.stage = 'asking_phone'; await sendWhatsAppText(from, phoneNumberId, `Please share your *mobile number*:`); return; }
-    if (!session.deliveryType) { session.stage = 'asking_delivery'; await sendWhatsAppText(from, phoneNumberId, `How would you like to receive your order?\n\n🚗 *pickup*\n🛵 *delivery* (Rs ${DELIVERY_CHARGE})`); return; }
-    if (session.deliveryType === 'delivery' && !session.address) { session.stage = 'asking_address'; await sendWhatsAppText(from, phoneNumberId, `Please share your *delivery address*:`); return; }
+  // ── 12. ASKING PAYMENT ────────────────────────────────────────────
+  if (session.stage === 'asking_payment') {
+    if (lower.includes('cash')) session.paymentMethod = session.deliveryType === 'delivery' ? 'Cash on Delivery' : 'Cash on Pickup';
+    else if (lower.includes('easypaisa')) session.paymentMethod = 'Easypaisa';
+    else if (lower.includes('jazzcash')) session.paymentMethod = 'JazzCash';
+    else if (lower.includes('bank')) session.paymentMethod = 'Bank Transfer';
+    else if (lower.includes('card')) session.paymentMethod = 'Card';
+    else { await sendWhatsAppText(from, phoneNumberId, `Please choose:\n• Cash\n• Easypaisa\n• JazzCash\n• Bank Transfer`); return; }
 
-    const cartTotal = session.cart.reduce((s, i) => s + i.price * i.quantity, 0);
-    const deliveryFee = session.deliveryType === 'delivery' ? DELIVERY_CHARGE : 0;
-    const grandTotal = cartTotal + deliveryFee;
+    session.stage = 'ready_to_checkout';
+    const total = cartTotal(session);
+    const deliveryFee = session.deliveryType === 'delivery' ? calcDeliveryFee(total) : 0;
+    const grandTotal = total + deliveryFee;
+
+    let summary = `📋 *Order Summary*\n\n`;
+    session.cart.forEach((item, i) => { summary += `${i + 1}. ${item.name} × ${item.quantity} = Rs ${(item.price * item.quantity).toFixed(2)}\n`; });
+    summary += `\nSubtotal: Rs ${total.toFixed(2)}`;
+    summary += `\nDelivery: Rs ${deliveryFee}${deliveryFee === 0 ? ' (Free!)' : ''}`;
+    summary += `\n*Total: Rs ${grandTotal.toFixed(2)}*`;
+    summary += `\n\n👤 ${session.name}\n📱 ${session.phone}`;
+    summary += `\n🚚 ${session.deliveryType === 'delivery' ? 'Delivery' : 'Pickup'}`;
+    if (session.deliveryType === 'delivery') summary += `\n📍 ${session.address}`;
+    summary += `\n💳 ${session.paymentMethod}`;
+    summary += `\n\nReply *"confirm"* to place order.`;
+    await sendWhatsAppText(from, phoneNumberId, summary); return;
+  }
+
+  // ── 13. CONFIRM ORDER ─────────────────────────────────────────────
+  if (/^confirm$/i.test(msg) || /^place order$/i.test(msg) || /^checkout$/i.test(msg) || (session.stage === 'ready_to_checkout' && /^yes$/i.test(msg))) {
+    if (session.cart.length === 0) { await sendWhatsAppText(from, phoneNumberId, `Cart is empty. Type medicine + quantity.`); return; }
+    if (!session.name) { session.stage = 'asking_name'; await sendWhatsAppText(from, phoneNumberId, `Please tell me your *full name*:`); return; }
+    if (!session.phone) { session.stage = 'asking_phone'; await sendWhatsAppText(from, phoneNumberId, `Please share your *mobile number*:`); return; }
+    if (!session.deliveryType) { session.stage = 'asking_delivery'; await sendWhatsAppText(from, phoneNumberId, `🚗 pickup or 🛵 delivery?`); return; }
+    if (session.deliveryType === 'delivery' && !session.address) { session.stage = 'asking_address'; await sendWhatsAppText(from, phoneNumberId, `Please share your *address*:`); return; }
+    if (!session.paymentMethod) { session.stage = 'asking_payment'; await sendWhatsAppText(from, phoneNumberId, `💳 Payment?\n• Cash\n• Easypaisa\n• JazzCash\n• Bank Transfer`); return; }
+
+    const total = cartTotal(session);
+    const deliveryFee = session.deliveryType === 'delivery' ? calcDeliveryFee(total) : 0;
+    const grandTotal = total + deliveryFee;
     const orderNum = 'ORD-' + Math.floor(10000 + Math.random() * 90000);
 
     createOrder({
-      id: orderNum, orderNumber: orderNum,
-      customerName: session.name, phone: session.phone,
-      address: session.address || 'Pickup from pharmacy',
-      deliveryType: session.deliveryType,
-      items: [...session.cart], subtotal: cartTotal, deliveryFee, total: grandTotal,
-      status: 'Pending', paymentStatus: 'Unpaid',
-      paymentMethod: session.deliveryType === 'delivery' ? 'Cash on Delivery' : 'Cash on Pickup',
+      id: orderNum, orderNumber: orderNum, customerName: session.name, phone: session.phone,
+      address: session.address || 'Pickup from pharmacy', deliveryType: session.deliveryType,
+      items: [...session.cart], subtotal: total, deliveryFee, total: grandTotal,
+      status: 'Pending', paymentStatus: 'Unpaid', paymentMethod: session.paymentMethod,
       notes: '', createdAt: new Date().toISOString(), source: 'WhatsApp',
     });
 
-    let summary = `✅ *Order Confirmed!*\n\nOrder #: *${orderNum}*\n\nItems:\n`;
+    const hasRx = session.cart.some(item => medicines.find(m => m.id === item.medicineId)?.prescriptionRequired);
+
+    let summary = `✅ *Order Confirmed!*\n\nOrder #: *${orderNum}*\n\n`;
     session.cart.forEach((item, i) => { summary += `${i + 1}. ${item.name} × ${item.quantity} = Rs ${(item.price * item.quantity).toFixed(2)}\n`; });
-    summary += `\nSubtotal: Rs ${cartTotal.toFixed(2)}`;
-    if (deliveryFee > 0) summary += `\nDelivery: Rs ${deliveryFee}`;
-    summary += `\n*Grand Total: Rs ${grandTotal.toFixed(2)}*`;
-    summary += `\n\n👤 Name: ${session.name}\n📱 Phone: ${session.phone}`;
-    if (session.deliveryType === 'delivery') { summary += `\n🛵 Delivery: ${session.address}\nDelivery Charges: Rs ${DELIVERY_CHARGE}`; }
-    else { summary += `\n🚗 Pickup from pharmacy`; }
-    summary += `\n💳 Payment: ${session.deliveryType === 'delivery' ? 'Cash on Delivery' : 'Cash on Pickup'}`;
-    summary += `\n\nTrack: "track ${orderNum}"\nCancel: "cancel ${orderNum}"\nEdit: "edit ${orderNum}"`;
+    summary += `\n*Total: Rs ${grandTotal.toFixed(2)}*`;
+    summary += `\n\n👤 ${session.name}\n📱 ${session.phone}`;
+    if (session.deliveryType === 'delivery') {
+      summary += `\n🛵 ${session.address}\n⏱️ 45-90 minutes`;
+    } else {
+      summary += `\n🚗 Pickup\n⏱️ Ready in 30 min`;
+    }
+    summary += `\n💳 ${session.paymentMethod}`;
+    if (hasRx) summary += `\n\n⚠️ Includes Rx medicines — pharmacist will verify before dispatch.`;
+    summary += `\n\nTrack: "track ${orderNum}"`;
 
     session.cart = []; session.stage = 'ready_to_order';
     await sendWhatsAppText(from, phoneNumberId, summary); return;
   }
 
-  // ── 13. MEDICINE SEARCH ───────────────────────────────────────────
+  // ── 14. MEDICINE SEARCH (no quantity) ────────────────────────────
   const medResults = searchMedicineByName(msg, medicines);
   if (medResults.length > 0) {
-    let response = `💊 *Found ${medResults.length} medicine(s):*\n\n`;
+    if (medResults.length === 1) {
+      const med = medResults[0];
+      await sendWhatsAppText(from, phoneNumberId,
+        `💊 *${med.name}*\n💰 Rs ${med.price.toFixed(2)}/tablet\n📦 ${med.stock} in stock\n${med.prescriptionRequired ? '⚠️ Rx required\n' : ''}\nTo order, type:\n"2 ${med.name}"`);
+      return;
+    }
+    let reply = `💊 Found ${medResults.length} medicines:\n\n`;
     medResults.forEach((med, i) => {
-      response += `${i + 1}. *${med.name}*\n   💰 Rs ${med.price.toFixed(2)} / tablet\n   📦 Stock: ${med.stock} units\n   ${med.prescriptionRequired ? '⚠️ Rx Medicine' : '✅ OTC (No prescription)'}\n\n`;
+      reply += `${i + 1}. *${med.name}* — Rs ${med.price.toFixed(2)}/tablet${med.prescriptionRequired ? ' ⚠️Rx' : ''}\n`;
     });
-    response += `To order, type quantity + name\nExample: "2 ${medResults[0].name}" → Rs ${(medResults[0].price * 2).toFixed(2)} total`;
-    await sendWhatsAppText(from, phoneNumberId, response); return;
+    reply += `\nType quantity + name to order.\nExample: "2 ${medResults[0].name}"`;
+    await sendWhatsAppText(from, phoneNumberId, reply); return;
   }
 
-  // ── 14. AI FALLBACK ───────────────────────────────────────────────
+  // ── 15. OUT OF STOCK CHECK ────────────────────────────────────────
+  const outOfStockMed = findMedicineIncludingOutOfStock(msg, medicines);
+  if (outOfStockMed) {
+    const subs = findSubstitutes(msg, medicines, outOfStockMed.id);
+    let reply = `❌ *${outOfStockMed.name}* is out of stock.`;
+    if (subs.length > 0) {
+      reply += `\n\nAlternatives:`;
+      subs.forEach((s, i) => { reply += `\n${i + 1}. ${s.name} — Rs ${s.price.toFixed(2)}/tablet ✅`; });
+    }
+    await sendWhatsAppText(from, phoneNumberId, reply); return;
+  }
+
+  // ── 16. MEDICAL QUESTION → ESCALATE ───────────────────────────────
+  const medicalKeywords = /symptom|diagnos|dosage|dose|side effect|interact|pregnan|breastfeed|allerg|headache|fever|pain|infection|disease|condition|treat|cure|medicine for|tablet for/i;
+  if (medicalKeywords.test(msg)) {
+    await sendWhatsAppText(from, phoneNumberId,
+      `I'm Prime Pharmacy's ordering assistant — I can't give medical advice.\n\nFor symptoms or dosage questions, our pharmacist will contact you.\n\nWould you like to search for a medicine?`);
+    return;
+  }
+
+  // ── 17. AI FALLBACK ──────────────────────────────────────────────
   const apiKey = process.env.OPENROUTER_API_KEY || process.env.NEXT_PUBLIC_OPENROUTER_API_KEY || '';
   if (apiKey) {
     try {
@@ -328,10 +391,10 @@ export async function handleWhatsAppMessage(from: string, message: string, phone
         body: JSON.stringify({
           model: 'google/gemini-2.0-flash-exp:free',
           messages: [
-            { role: 'system', content: `You are Prime Pharmacy WhatsApp bot. Keep replies under 3 lines. Customer: ${session.name || 'unknown'}.` },
+            { role: 'system', content: `${PHARMACY_KB}\n\nReply on WhatsApp for Prime Pharmacy. Under 3 lines. Customer: ${session.name || 'unknown'}.` },
             { role: 'user', content: msg }
           ],
-          max_tokens: 150,
+          max_tokens: 200,
         }),
       });
       const data = await res.json();
@@ -340,6 +403,7 @@ export async function handleWhatsAppMessage(from: string, message: string, phone
     } catch (e) { console.error('AI fallback error:', e); }
   }
 
+  // ── 18. FINAL FALLBACK ───────────────────────────────────────────
   await sendWhatsAppText(from, phoneNumberId,
-    `Type a medicine name + quantity to order.\nExample: "5 Glucophage" or "10 Panadol 500mg"\n\nOr type a medicine name to search.`);
+    `Type medicine name + quantity to order.\nExample: "5 Glucophage" or "10 Panadol 500mg"\n\nOr type a medicine name to search.`);
 }

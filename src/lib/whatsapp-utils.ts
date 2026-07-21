@@ -110,3 +110,49 @@ export function isPersonalInfo(text: string): boolean {
   const hasAddressWords = /street|block|sector|road|avenue|district|area|colony|town|gulberg|johar|allama|house|building|flat/i.test(text);
   return hasPhone || hasAddressWords;
 }
+
+// ── Find substitutes by same generic/salt or same category ────────────────
+export function findSubstitutes(medName: string, inventory: Medicine[], excludeId?: string): Medicine[] {
+  const cleanQuery = medName.toLowerCase().trim();
+  // First find the medicine to get its generic name
+  const source = findMedicineForOrder(medName, inventory);
+  if (!source) return [];
+
+  const generic = source.generic.toLowerCase();
+  const category = (source as any).category?.toLowerCase() || '';
+
+  const subs: Medicine[] = [];
+  for (const med of inventory) {
+    if (med.id === source.id || med.id === excludeId) continue;
+    if (med.stock <= 0 || med.status === 'Out of Stock') continue;
+    // Same generic/salt or same category
+    if (med.generic.toLowerCase() === generic) {
+      subs.push(med);
+    }
+  }
+  return subs.slice(0, 3);
+}
+
+// ── Find out-of-stock medicine to check if it exists but is unavailable ────
+export function findMedicineIncludingOutOfStock(medName: string, inventory: Medicine[]): Medicine | null {
+  const cleanQuery = medName.toLowerCase().trim();
+  const nameOnly = cleanQuery
+    .replace(/^\d+\s+/, '')
+    .replace(/\b\d+\s*(?:mg|g|ml|mcg|iu|%|mcg)\b/gi, '')
+    .replace(/\s+/g, ' ').trim();
+  if (!nameOnly) return null;
+
+  let best: { med: Medicine; score: number } | null = null;
+
+  for (const med of inventory) {
+    const mN = med.name.toLowerCase();
+    const mG = med.generic.toLowerCase();
+    const mB = med.brand.toLowerCase();
+    let score = 0;
+    if (mB === nameOnly || mG === nameOnly || mN === nameOnly) score = 200;
+    else if (mB.startsWith(nameOnly) || mG.startsWith(nameOnly) || mN.startsWith(nameOnly)) score = 160;
+    else if (mB.includes(nameOnly) || mG.includes(nameOnly) || mN.includes(nameOnly)) score = 120;
+    if (score > 0 && (!best || score > best.score)) best = { med, score };
+  }
+  return best ? best.med : null;
+}
