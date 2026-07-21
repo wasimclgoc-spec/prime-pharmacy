@@ -1,114 +1,222 @@
-import { searchMedicineByName, parseCustomerInfoFromText, isPersonalInfo } from './whatsapp-utils';
+import { searchMedicineByName } from './whatsapp-utils';
 import { medicines } from './whatsapp-inventory';
-import { sendWhatsAppMessage, sendWhatsAppText } from './whatsapp-client';
+import { sendWhatsAppText } from './whatsapp-client';
 
-// ── In-memory session store (per phone number) ──────────────────────────
-// In production, replace with Redis or database
+interface CartItem { medicineId: string; name: string; price: number; quantity: number }
 interface WhatsAppSession {
-  phone: string;
   name: string;
+  phone: string;
   address: string;
-  cart: { medicineId: string; name: string; price: number; quantity: number }[];
-  prescriptionUploaded: boolean;
-  stage: 'greeting' | 'collecting_info' | 'ready_to_order' | 'ordering';
+  deliveryType: string;
+  cart: CartItem[];
+  stage: string;
   lastActivity: number;
 }
 
+const DELIVERY_CHARGE = 20;
 const sessions = new Map<string, WhatsAppSession>();
 
-// Session expires after 30 minutes of inactivity
-const SESSION_TIMEOUT = 30 * 60 * 1000;
-
-function getSession(phone: string): WhatsAppSession {
-  const now = Date.now();
-  let session = sessions.get(phone);
-
-  if (!session || (now - session.lastActivity) > SESSION_TIMEOUT) {
-    session = {
-      phone,
-      name: '',
-      address: '',
-      cart: [],
-      prescriptionUploaded: false,
-      stage: 'greeting',
-      lastActivity: now,
-    };
-    sessions.set(phone, session);
+function getSession(from: string): WhatsAppSession {
+  let session = sessions.get(from);
+  if (!session) {
+    session = { name: '', phone: '', address: '', deliveryType: '', cart: [], stage: 'greeting', lastActivity: Date.now() };
+    sessions.set(from, session);
   }
-
-  session.lastActivity = now;
+  session.lastActivity = Date.now();
   return session;
 }
 
-// ── Main message handler ─────────────────────────────────────────────────
-export async function handleWhatsAppMessage(
-  from: string,
-  text: string,
-  phoneNumberId: string,
-  messageId: string,
-  messageType: string
-) {
+// Clean old sessions (older than 30 min)
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, session] of sessions.entries()) {
+    if (now - session.lastActivity > 30 * 60 * 1000) sessions.delete(key);
+  }
+}, 5 * 60 * 1000);
+
+export async function handleWhatsAppMessage(from: string, message: string, phoneNumberId: string) {
   const session = getSession(from);
-  const message = text.trim();
+  const msg = message.trim();
+  const lower = msg.toLowerCase();
 
-  console.log(`Processing message from ${from}: "${message}" | Stage: ${session.stage}`);
-
-  // ── Handle image (prescription upload) ──
-  if (message.includes('[IMAGE_RECEIVED]')) {
-    session.prescriptionUploaded = true;
+  // ── 1. GREETING → full reset ────────────────────────────────────────
+  const isGreeting = /^(hi|hello|hey|salam|salaam|start|assalam|good morning|good evening|good afternoon)[\s!.]*$/i.test(msg);
+  if (isGreeting) {
+    Object.assign(session, { name: '', phone: '', address: '', deliveryType: '', cart: [], stage: 'greeting' });
     await sendWhatsAppText(from, phoneNumberId,
-      `✅ Prescription received!\n\nOur pharmacist will review it shortly.\n\nNow, please tell me:\n1. Your *full name*\n2. Your *mobile number*\n3. Your *delivery address*\n\nYou can send all in one message, e.g.:\n"Ahmed 0300 1234567 Gulberg Lahore"`
-    );
-    session.stage = 'collecting_info';
-    return;
-  }
-
-  // ── Detect greeting ──
-  const greetingPattern = /^(hi|hello|hey|salam|salaam|start|assalam|good morning|good evening|good afternoon)[\s!.]*$/i;
-  if (greetingPattern.test(message)) {
-    // Reset session on greeting
-    session.name = '';
-    session.address = '';
-    session.cart = [];
-    session.prescriptionUploaded = false;
-    session.stage = 'greeting';
-
-    await sendWhatsAppText(from, phoneNumberId,
-      `👋 Welcome to *Prime Pharmacy*!\n\nI can help you with:\n💊 Search medicines (e.g. "Panadol 500mg")\n📷 Upload prescription\n📦 Place orders\n\nHow can I help you today?`
+      `👋 Welcome to Prime Pharmacy!\n\nI can help you with:\n💊 Search medicines by name\n🛒 Place orders\n📦 Track your orders\n\nType a medicine name to search, e.g. "Paracetamol"`
     );
     return;
   }
 
-  // ── Order check FIRST: "10 Amoxicillin 500mg" pattern ──
-  const orderMatch = message.match(/^(\d+)\s+(.+)$/i);
+  // ── 2. IMAGE → prescription received ───────────────────────────────
+  if (msg.includes('[IMAGE]') || msg.includes('[IMAGE_RECEIVED]')) {
+    await sendWhatsAppText(from, phoneNumberId,
+      `✅ Prescription received! Our pharmacist will review it.\n\nNow type a medicine name to search or add to cart.`
+    );
+    return;
+  }
+
+  // ── 3. STAGE: asking_name ──────────────────────────────────────────
+  if (session.stage === 'asking_name') {
+    session.name = msg;
+    session.stage = 'asking_phone';
+    await sendWhatsAppText(from, phoneNumberId,
+      `Nice to meet you, *${session.name}*! 🙌\n\nPlease share your mobile number:\nExample: "03001234567"`
+    );
+    return;
+  }
+
+  // ── 4. STAGE: asking_phone ─────────────────────────────────────────
+  if (session.stage === 'asking_phone') {
+    const phoneMatch = msg.match(/[\d\s+\-]{8,}/);
+    if (phoneMatch) {
+      session.phone = phoneMatch[0].replace(/\s/g, '');
+      session.stage = 'asking_delivery';
+      await sendWhatsAppText(from, phoneNumberId,
+        `Got it! 📱 ${session.phone}\n\nHow would you like to receive your order?\n\nType:\n🚗 *pickup* — Collect from pharmacy (no charge)\n🛵 *delivery* — Home delivery (Rs ${DELIVERY_CHARGE} charges)`
+      );
+      return;
+    }
+    await sendWhatsAppText(from, phoneNumberId, `Please send a valid mobile number.\nExample: "03001234567"`);
+    return;
+  }
+
+  // ── 5. STAGE: asking_delivery ──────────────────────────────────────
+  if (session.stage === 'asking_delivery') {
+    if (lower.includes('pickup') || lower.includes('collect') || lower.includes('pick')) {
+      session.deliveryType = 'pickup';
+      session.stage = 'ready_to_checkout';
+      const cartTotal = session.cart.reduce((s, i) => s + i.price * i.quantity, 0);
+      await sendWhatsAppText(from, phoneNumberId,
+        `🚗 Pickup selected — no delivery charges.\n\n🛒 *Order Summary:*\n${session.cart.map((item, i) => `${i + 1}. ${item.name} × ${item.quantity} = Rs ${(item.price * item.quantity).toFixed(2)}`).join('\n')}\n\nSubtotal: Rs ${cartTotal.toFixed(2)}\nDelivery: Rs 0\n*Total: Rs ${cartTotal.toFixed(2)}*\n\nType "confirm order" to place your order.`
+      );
+      return;
+    }
+    if (lower.includes('delivery') || lower.includes('home') || lower.includes('deliver')) {
+      session.deliveryType = 'delivery';
+      session.stage = 'asking_address';
+      await sendWhatsAppText(from, phoneNumberId,
+        `🛵 Delivery selected — Rs ${DELIVERY_CHARGE} charges.\n\nPlease share your delivery address:\nExample: "House 12, Street 5, Gulberg, Lahore"`
+      );
+      return;
+    }
+    await sendWhatsAppText(from, phoneNumberId,
+      `Please type:\n🚗 *pickup* — Collect from pharmacy (no charge)\n🛵 *delivery* — Home delivery (Rs ${DELIVERY_CHARGE} charges)`
+    );
+    return;
+  }
+
+  // ── 6. STAGE: asking_address ──────────────────────────────────────
+  if (session.stage === 'asking_address') {
+    session.address = msg;
+    session.stage = 'ready_to_checkout';
+    const cartTotal = session.cart.reduce((s, i) => s + i.price * i.quantity, 0);
+    const grandTotal = cartTotal + DELIVERY_CHARGE;
+    await sendWhatsAppText(from, phoneNumberId,
+      `📍 Address saved!\n\n🛒 *Order Summary:*\n${session.cart.map((item, i) => `${i + 1}. ${item.name} × ${item.quantity} = Rs ${(item.price * item.quantity).toFixed(2)}`).join('\n')}\n\nSubtotal: Rs ${cartTotal.toFixed(2)}\nDelivery: Rs ${DELIVERY_CHARGE}\n*Total: Rs ${grandTotal.toFixed(2)}*\n\nType "confirm order" to place your order.`
+    );
+    return;
+  }
+
+  // ── 7. ORDER FIRST: "10 Amoxicillin 500mg" ─────────────────────────
+  const orderMatch = msg.match(/^(\d+)\s+(.+)$/i);
   if (orderMatch) {
     const quantity = parseInt(orderMatch[1]);
-    const medName = orderMatch[2];
+    const medName = orderMatch[2].trim();
     const results = searchMedicineByName(medName, medicines);
 
     if (results.length > 0) {
       const med = results[0];
-      session.cart.push({
-        medicineId: med.id,
-        name: med.name,
-        price: med.price,
-        quantity,
-      });
+      session.cart.push({ medicineId: med.id, name: med.name, price: med.price, quantity });
+      const cartTotal = session.cart.reduce((s, i) => s + i.price * i.quantity, 0);
 
-      const cartTotal = session.cart.reduce((sum, item) => sum + (item.price * item.quantity), 0);
-      session.stage = 'ordering';
+      const rxPrompt = med.prescriptionRequired
+        ? `⚠️ *${med.name}* is a prescription medicine. Please upload your prescription photo (optional but recommended).`
+        : `📎 You can upload a prescription if you have one (optional).`;
 
-      const needsInfo = !session.name || !session.address;
+      if (!session.name) {
+        session.stage = 'asking_name';
+        await sendWhatsAppText(from, phoneNumberId,
+          `✅ Added to cart:\n*${med.name}* × ${quantity}\n   Rs ${med.price.toFixed(2)}/tablet × ${quantity} = Rs ${(med.price * quantity).toFixed(2)}\n\n🛒 *Cart Total: Rs ${cartTotal.toFixed(2)}*\n\n${rxPrompt}\n\nTo continue, please tell me your *full name*:\nExample: "Ahmed Khan"`
+        );
+        return;
+      }
+
       await sendWhatsAppText(from, phoneNumberId,
-        `✅ Added to cart:\n*${med.name}* × ${quantity}\n   Rs ${med.price.toFixed(2)}/tablet × ${quantity} = Rs ${(med.price * quantity).toFixed(2)}\n\n🛒 Cart Total: Rs ${cartTotal.toFixed(2)}\n\n${needsInfo ? 'To confirm order, please send your name and delivery address.\nExample: "Ahmed 03001234567 Gulberg Lahore"' : 'Type "confirm order" to checkout, or add more medicines.'}`
+        `✅ Added to cart:\n*${med.name}* × ${quantity}\n   Rs ${med.price.toFixed(2)}/tablet × ${quantity} = Rs ${(med.price * quantity).toFixed(2)}\n\n🛒 *Cart Total: Rs ${cartTotal.toFixed(2)}*\n\n${rxPrompt}\n\nType "confirm order" to checkout, or add more medicines.`
       );
       return;
     }
   }
 
-  // ── Check if customer is searching for a medicine ──
-  const medResults = searchMedicineByName(message, medicines);
-  if (medResults.length > 0 && !isPersonalInfo(message)) {
+  // ── 8. CONFIRM ORDER ───────────────────────────────────────────────
+  if (/confirm|place order|checkout/i.test(msg) && session.cart.length > 0) {
+    if (!session.name) {
+      session.stage = 'asking_name';
+      await sendWhatsAppText(from, phoneNumberId,
+        `Let's complete your order! 📝\n\nPlease tell me your *full name*:\nExample: "Ahmed Khan"`
+      );
+      return;
+    }
+    if (!session.phone) {
+      session.stage = 'asking_phone';
+      await sendWhatsAppText(from, phoneNumberId,
+        `Please share your *mobile number*:\nExample: "03001234567"`
+      );
+      return;
+    }
+    if (!session.deliveryType) {
+      session.stage = 'asking_delivery';
+      await sendWhatsAppText(from, phoneNumberId,
+        `How would you like to receive your order?\n\nType:\n🚗 *pickup* — Collect from pharmacy (no charge)\n🛵 *delivery* — Home delivery (Rs ${DELIVERY_CHARGE} charges)`
+      );
+      return;
+    }
+    if (session.deliveryType === 'delivery' && !session.address) {
+      session.stage = 'asking_address';
+      await sendWhatsAppText(from, phoneNumberId,
+        `Please share your *delivery address*:\nExample: "House 12, Street 5, Gulberg, Lahore"`
+      );
+      return;
+    }
+
+    // All info collected — confirm order
+    const cartTotal = session.cart.reduce((s, i) => s + i.price * i.quantity, 0);
+    const deliveryFee = session.deliveryType === 'delivery' ? DELIVERY_CHARGE : 0;
+    const grandTotal = cartTotal + deliveryFee;
+    const orderNum = 'ORD-' + Math.floor(10000 + Math.random() * 90000);
+
+    let summary = `✅ *Order Confirmed!*\n\nOrder #: *${orderNum}*\n\n`;
+    session.cart.forEach((item, i) => {
+      summary += `${i + 1}. ${item.name} × ${item.quantity} = Rs ${(item.price * item.quantity).toFixed(2)}\n`;
+    });
+    summary += `\nSubtotal: Rs ${cartTotal.toFixed(2)}`;
+    if (deliveryFee > 0) {
+      summary += `\nDelivery: Rs ${deliveryFee}`;
+    }
+    summary += `\n*Grand Total: Rs ${grandTotal.toFixed(2)}*`;
+    summary += `\n\n👤 Name: ${session.name}`;
+    summary += `\n📱 Phone: ${session.phone}`;
+    if (session.deliveryType === 'delivery') {
+      summary += `\n🛵 Delivery: ${session.address}`;
+      summary += `\nDelivery Charges: Rs ${DELIVERY_CHARGE}`;
+    } else {
+      summary += `\n🚗 Pickup from pharmacy`;
+    }
+    summary += `\n💳 Payment: Cash on ${session.deliveryType === 'delivery' ? 'Delivery' : 'Pickup'}`;
+    summary += `\n\nTrack with order #: *${orderNum}*`;
+
+    session.cart = [];
+    session.stage = 'ready_to_order';
+
+    await sendWhatsAppText(from, phoneNumberId, summary);
+    return;
+  }
+
+  // ── 9. MEDICINE SEARCH ─────────────────────────────────────────────
+  const medResults = searchMedicineByName(msg, medicines);
+  if (medResults.length > 0) {
     let response = `💊 *Found ${medResults.length} medicine(s):*\n\n`;
     medResults.forEach((med, i) => {
       response += `${i + 1}. *${med.name}*\n`;
@@ -116,109 +224,43 @@ export async function handleWhatsAppMessage(
       response += `   📦 Stock: ${med.stock} units\n`;
       response += `   ${med.prescriptionRequired ? '⚠️ Rx Medicine' : '✅ OTC (No prescription)'}\n\n`;
     });
-    response += `To order, type quantity + medicine name.\nExample: "2 ${medResults[0].name}" → Rs ${(medResults[0].price * 2).toFixed(2)} total`;
-
+    response += `To order, type quantity + name\nExample: "2 ${medResults[0].name}" → Rs ${(medResults[0].price * 2).toFixed(2)} total`;
     await sendWhatsAppText(from, phoneNumberId, response);
     return;
   }
 
-  // ── Collect customer info (name, phone, address) ──
-  const extracted = parseCustomerInfoFromText(message);
-
-  if (extracted.name || extracted.phone || extracted.address) {
-    if (extracted.name) session.name = extracted.name;
-    if (extracted.address) session.address = extracted.address;
-
-    const hasName = session.name.length > 0;
-    const hasAddress = session.address.length > 0;
-
-    if (hasName && hasAddress) {
-      session.stage = 'ready_to_order';
-      await sendWhatsAppText(from, phoneNumberId,
-        `✅ Got it, *${session.name}*!\n\nHere's what I have:\n👤 Name: ${session.name}\n📱 Phone: ${from}\n📍 Address: ${session.address}\n\nNow you can:\n💊 Search medicines by name\n📷 Upload your prescription\n\nWhat would you like to do?`
-      );
-      return;
-    } else {
-      const missing = [];
-      if (!hasName) missing.push('Full Name');
-      if (!hasAddress) missing.push('Delivery Address');
-      await sendWhatsAppText(from, phoneNumberId,
-        `Almost there! I still need your *${missing.join(' and ')}*.\n\nPlease send them in one message.`
-      );
-      session.stage = 'collecting_info';
-      return;
+  // ── 10. AI FALLBACK ────────────────────────────────────────────────
+  const apiKey = process.env.OPENROUTER_API_KEY || process.env.NEXT_PUBLIC_OPENROUTER_API_KEY || '';
+  if (apiKey) {
+    try {
+      const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': 'https://prime-pharmacy.vercel.app',
+        },
+        body: JSON.stringify({
+          model: 'google/gemini-2.0-flash-exp:free',
+          messages: [
+            { role: 'system', content: `You are Prime Pharmacy WhatsApp bot. Keep replies under 3 lines. Help with medicines and orders. Customer: ${session.name || 'unknown'}.` },
+            { role: 'user', content: msg }
+          ],
+          max_tokens: 150,
+        }),
+      });
+      const data = await res.json();
+      const reply = data.choices?.[0]?.message?.content;
+      if (reply) {
+        await sendWhatsAppText(from, phoneNumberId, reply);
+        return;
+      }
+    } catch (e) {
+      console.error('AI fallback error:', e);
     }
   }
 
-  // ── Confirm order ──
-  if (/confirm|place order|order karo|order karein/i.test(message) && session.cart.length > 0) {
-    // Prescription is optional — place order directly
-    // Place the order
-    const orderNumber = 'ORD-' + Math.floor(10000 + Math.random() * 90000);
-    const total = session.cart.reduce((sum, item) => sum + (item.price * item.quantity), 0);
-
-    let orderSummary = `✅ *Order Confirmed!*\n\n`;
-    orderSummary += `Order #: *${orderNumber}*\n\n`;
-    orderSummary += `Items:\n`;
-    session.cart.forEach((item, i) => {
-      orderSummary += `${i + 1}. ${item.name} × ${item.quantity} = Rs ${(item.price * item.quantity).toFixed(2)}\n`;
-    });
-    orderSummary += `\nTotal: *Rs ${total.toFixed(2)}*\n`;
-    orderSummary += `\nCustomer: ${session.name}\n`;
-    orderSummary += `Phone: ${from}\n`;
-    orderSummary += `Address: ${session.address}\n`;
-    orderSummary += `\nPayment: Cash on Delivery\n`;
-    orderSummary += `Status: Pending\n\n`;
-    orderSummary += `You can track your order in the app using order number ${orderNumber}`;
-
-    await sendWhatsAppText(from, phoneNumberId, orderSummary);
-
-    // Reset cart
-    session.cart = [];
-    session.stage = 'ready_to_order';
-    return;
-  }
-
-  // ── Default: Use AI (OpenRouter) for general queries ──
-  const apiKey = process.env.OPENROUTER_API_KEY || process.env.NEXT_PUBLIC_OPENROUTER_API_KEY || '';
-
-  if (!apiKey) {
-    await sendWhatsAppText(from, phoneNumberId,
-      `I can help you with:\n\n💊 Search medicines (e.g. "Panadol 500mg")\n📷 Upload prescription\n📦 Place orders\n\nWhat would you like to do?`
-    );
-    return;
-  }
-
-  try {
-    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-        'HTTP-Referer': 'https://prime-pharmacy.vercel.app',
-        'X-Title': 'Prime Pharmacy WhatsApp',
-      },
-      body: JSON.stringify({
-        model: 'google/gemini-2.0-flash-exp:free',
-        messages: [
-          {
-            role: 'system',
-            content: `You are Prime Pharmacy AI Assistant. Help customers with medicine search, orders, and prescriptions. Keep responses short (max 3-4 lines). Available medicines: ${medicines.map(m => m.name + ' (Rs ' + m.price.toFixed(2) + ')').join(', ')}. Customer phone: ${from}. Customer name: ${session.name || 'unknown'}.`
-          },
-          { role: 'user', content: message }
-        ],
-        max_tokens: 300,
-      }),
-    });
-
-    const data = await response.json();
-    const aiReply = data.choices?.[0]?.message?.content || 'Sorry, I did not understand. Try searching a medicine by name.';
-
-    await sendWhatsAppText(from, phoneNumberId, aiReply);
-  } catch (error) {
-    console.error('AI error:', error);
-    await sendWhatsAppText(from, phoneNumberId,
-      `I can help you with:\n💊 Search medicines (e.g. "Panadol 500mg")\n📷 Upload prescription\n📦 Place orders`
-    );
-  }
+  await sendWhatsAppText(from, phoneNumberId,
+    `I can help you with:\n💊 Search medicines by name\n🛒 Order: type "2 Panadol 500mg"\n📦 Track orders\n\nWhat would you like?`
+  );
 }
