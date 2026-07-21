@@ -6,7 +6,7 @@ import { usePathname } from "next/navigation";
 import { useAdminStore } from "@/lib/admin-store";
 import { 
   LayoutDashboard, ShoppingCart, Pill, Users, Truck, 
-  BarChart3, Settings, ShieldCheck, LogOut, ChevronLeft, ChevronRight, Menu, 
+  BarChart3, Settings, ShieldCheck, LogOut, ChevronLeft, ChevronRight, Menu, MessageCircle, 
   FileText, Briefcase
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
@@ -77,6 +77,12 @@ export default function Sidebar({
       path: "/admin/analytics",
       icon: <BarChart3 className="w-5 h-5" />,
       roles: ["Admin", "Manager"],
+    },
+    {
+      title: "WhatsApp",
+      path: "/admin/whatsapp-test",
+      icon: <MessageCircle className="w-5 h-5" />,
+      roles: ["Admin"],
     },
     {
       title: "Settings",
