@@ -441,7 +441,7 @@ export default function PurchasesPage() {
                   </div>
                   <div className="md:col-span-2">
                     <label className="block text-[10px] font-bold text-slate-400 uppercase mb-1">
-                      Unit Cost ($)
+                      Unit Cost (Rs)
                     </label>
                     <input
                       type="number"

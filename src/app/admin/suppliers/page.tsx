@@ -462,7 +462,7 @@ export default function SuppliersPage() {
                                 <td className="py-3 font-semibold text-slate-700 dark:text-slate-300">{po.id}</td>
                                 <td className="py-3 text-slate-500">{po.date}</td>
                                 <td className="py-3 text-slate-500">{po.itemsCount} items</td>
-                                <td className="py-3 font-semibold">${po.totalAmount.toLocaleString()}</td>
+                                <td className="py-3 font-semibold">Rs ${po.totalAmount.toLocaleString()}</td>
                                 <td className="py-3 text-right">
                                   <span
                                     className={`px-2 py-0.5 rounded-full font-bold text-[9px] uppercase ${
@@ -508,9 +508,9 @@ export default function SuppliersPage() {
                               <tr key={inv.id} className="border-b border-slate-100/50 dark:border-slate-800/50">
                                 <td className="py-3 font-semibold text-slate-700 dark:text-slate-300">{inv.id}</td>
                                 <td className="py-3 text-slate-500">{inv.date}</td>
-                                <td className="py-3 font-semibold">${inv.amount.toLocaleString()}</td>
-                                <td className="py-3 text-emerald-600 font-medium">${inv.paidAmount.toLocaleString()}</td>
-                                <td className="py-3 text-red-600 font-semibold">${(inv.amount - inv.paidAmount).toLocaleString()}</td>
+                                <td className="py-3 font-semibold">Rs ${inv.amount.toLocaleString()}</td>
+                                <td className="py-3 text-emerald-600 font-medium">Rs ${inv.paidAmount.toLocaleString()}</td>
+                                <td className="py-3 text-red-600 font-semibold">Rs ${(inv.amount - inv.paidAmount).toLocaleString()}</td>
                                 <td className="py-3 text-right">
                                   <span
                                     className={`px-2 py-0.5 rounded-full font-bold text-[9px] uppercase ${
@@ -560,7 +560,7 @@ export default function SuppliersPage() {
                                 <td className="py-3 text-slate-500">{ret.date}</td>
                                 <td className="py-3 text-slate-600 dark:text-slate-300">{ret.item}</td>
                                 <td className="py-3 font-medium">{ret.qty} units</td>
-                                <td className="py-3 font-semibold text-emerald-600">${ret.refundAmount}</td>
+                                <td className="py-3 font-semibold text-emerald-600">Rs ${ret.refundAmount}</td>
                                 <td className="py-3 text-right">
                                   <span
                                     className={`px-2 py-0.5 rounded-full font-bold text-[9px] uppercase ${

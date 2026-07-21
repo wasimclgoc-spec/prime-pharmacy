@@ -141,7 +141,7 @@ export default function AnalyticsPage() {
                 <Area
                   type="monotone"
                   dataKey="Revenue"
-                  name="Historical Sales ($)"
+                  name="Historical Sales (Rs)"
                   stroke="#10b981"
                   strokeWidth={2.5}
                   fillOpacity={1}
@@ -150,7 +150,7 @@ export default function AnalyticsPage() {
                 <Area
                   type="monotone"
                   dataKey="Forecast"
-                  name="AI Projected Sales ($)"
+                  name="AI Projected Sales (Rs)"
                   stroke="#0284c7"
                   strokeWidth={3}
                   strokeDasharray="5 5"

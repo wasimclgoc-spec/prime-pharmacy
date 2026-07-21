@@ -118,7 +118,7 @@ export default function ReportsPage() {
           data: salesReportData,
           columns: [
             { header: "Date Interval", key: "name" },
-            { header: "Gross Sales ($)", key: "Sales" },
+            { header: "Gross Sales (Rs)", key: "Sales" },
             { header: "Order Count", key: "Orders" },
           ],
         };
@@ -128,8 +128,8 @@ export default function ReportsPage() {
           data: profitReportData,
           columns: [
             { header: "Date Interval", key: "name" },
-            { header: "Revenue ($)", key: "Revenue" },
-            { header: "Cost ($)", key: "Cost" },
+            { header: "Revenue (Rs)", key: "Revenue" },
+            { header: "Cost (Rs)", key: "Cost" },
             { header: "Net Profit ($)", key: "Profit" },
           ],
         };
@@ -487,7 +487,7 @@ export default function ReportsPage() {
                     {currentReport.columns.map((col) => (
                       <td key={col.key} className="py-3.5 font-medium text-slate-700 dark:text-slate-300">
                         {typeof row[col.key] === "number" && col.header.includes("$")
-                          ? `$${row[col.key].toLocaleString()}`
+                          ? `Rs ${row[col.key].toLocaleString()}`
                           : row[col.key]}
                       </td>
                     ))}

@@ -69,7 +69,7 @@ export async function POST(req: NextRequest) {
         session.stage = 'ordering';
         const needsInfo = !session.name || !session.address;
         return NextResponse.json({
-          reply: `✅ Added to cart:\n*${med.name}* × ${quantity} = Rs ${(med.price * quantity).toFixed(2)}\n\n🛒 *Cart Total: Rs ${cartTotal.toFixed(2)}*\n\n${
+          reply: `✅ Added to cart:\n*${med.name}* × ${quantity}\n   Rs ${med.price.toFixed(2)}/tablet × ${quantity} = Rs ${(med.price * quantity).toFixed(2)}\n\n🛒 *Cart Total: Rs ${cartTotal.toFixed(2)}*\n\n${
             needsInfo
               ? 'To confirm order, send your name and address:\nExample: "Ahmed 03001234567 Gulberg Lahore"'
               : 'Type "confirm order" to checkout, or add more medicines.'
@@ -126,11 +126,11 @@ export async function POST(req: NextRequest) {
       let response = `💊 Found *${medResults.length}* medicine(s):\n\n`;
       medResults.forEach((med, i) => {
         response += `${i + 1}. *${med.name}*\n`;
-        response += `   💰 Rs ${med.price.toFixed(2)} | 📦 Stock: ${med.stock}\n`;
-        response += `   🏷️ ${med.brand} | ${med.generic}\n`;
+        response += `   💰 Rs ${med.price.toFixed(2)} / tablet\n`;
+        response += `   📦 Stock: ${med.stock} units\n`;
         response += `   ${med.prescriptionRequired ? '⚠️ Rx Medicine' : '✅ OTC'}\n\n`;
       });
-      response += `To order, type quantity + name\nExample: "*2 ${medResults[0].name}*"`;
+      response += `To order, type quantity + name\nExample: "*2 ${medResults[0].name}*" → Rs ${(medResults[0].price * 2).toFixed(2)} total`;
       return NextResponse.json({ reply: response });
     }
 

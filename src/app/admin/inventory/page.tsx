@@ -639,7 +639,7 @@ export default function AdminInventoryPage() {
             {/* Cost price */}
             <div className="space-y-1.5">
               <label className="text-xs font-bold text-slate-400 dark:text-slate-400 uppercase tracking-wider block">
-                Cost Price ($)
+                Cost Price (Rs)
               </label>
               <input
                 type="number"
@@ -654,7 +654,7 @@ export default function AdminInventoryPage() {
             {/* Retail price */}
             <div className="space-y-1.5">
               <label className="text-xs font-bold text-slate-400 dark:text-slate-400 uppercase tracking-wider block">
-                Retail Price ($)
+                Retail Price (Rs)
               </label>
               <input
                 type="number"

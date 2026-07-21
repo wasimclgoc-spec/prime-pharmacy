@@ -100,7 +100,7 @@ export async function handleWhatsAppMessage(
 
       const needsInfo = !session.name || !session.address;
       await sendWhatsAppText(from, phoneNumberId,
-        `✅ Added to cart:\n${med.name} × ${quantity} = Rs ${(med.price * quantity).toFixed(2)}\n\n🛒 Cart Total: Rs ${cartTotal.toFixed(2)}\n\n${needsInfo ? 'To confirm order, please send your name and delivery address.\nExample: "Ahmed 03001234567 Gulberg Lahore"' : 'Type "confirm order" to checkout, or add more medicines.'}`
+        `✅ Added to cart:\n*${med.name}* × ${quantity}\n   Rs ${med.price.toFixed(2)}/tablet × ${quantity} = Rs ${(med.price * quantity).toFixed(2)}\n\n🛒 Cart Total: Rs ${cartTotal.toFixed(2)}\n\n${needsInfo ? 'To confirm order, please send your name and delivery address.\nExample: "Ahmed 03001234567 Gulberg Lahore"' : 'Type "confirm order" to checkout, or add more medicines.'}`
       );
       return;
     }
@@ -112,12 +112,11 @@ export async function handleWhatsAppMessage(
     let response = `💊 *Found ${medResults.length} medicine(s):*\n\n`;
     medResults.forEach((med, i) => {
       response += `${i + 1}. *${med.name}*\n`;
-      response += `   💰 Price: Rs ${med.price.toFixed(2)}\n`;
+      response += `   💰 Rs ${med.price.toFixed(2)} / tablet\n`;
       response += `   📦 Stock: ${med.stock} units\n`;
-      response += `   🏷️ Brand: ${med.brand} | Generic: ${med.generic}\n`;
       response += `   ${med.prescriptionRequired ? '⚠️ Rx Medicine' : '✅ OTC (No prescription)'}\n\n`;
     });
-    response += `To order, type quantity + medicine name.\nExample: "2 ${medResults[0].name}"`;
+    response += `To order, type quantity + medicine name.\nExample: "2 ${medResults[0].name}" → Rs ${(medResults[0].price * 2).toFixed(2)} total`;
 
     await sendWhatsAppText(from, phoneNumberId, response);
     return;
