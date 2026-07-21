@@ -350,7 +350,7 @@ Track: "track ${order.orderNumber}"` });
         session.phone = phoneMatch[0].replace(/\s/g, '');
         session.stage = 'asking_delivery';
         return NextResponse.json({
-          reply: `Got it! 📱 \${session.phone}\n\nHow would you like to receive your order?\n\n🚗 *pickup* — Collect from pharmacy (no charge)\n🛵 *delivery* — Home delivery (Rs \${DELIVERY_CHARGE}, free above Rs \${FREE_DELIVERY_THRESHOLD})`
+          reply: 'Got it! 📱 ' + session.phone + '\n\nHow would you like to receive your order?\n\n🚗 *pickup* — Collect from pharmacy (no charge)\n🛵 *delivery* — Home delivery (Rs ' + DELIVERY_CHARGE + ', free above Rs ' + FREE_DELIVERY_THRESHOLD + ')'
         });
       }
       return NextResponse.json({ reply: `Please send a valid mobile number.\nExample: "03001234567"` });
@@ -390,14 +390,14 @@ Track: "track ${order.orderNumber}"` });
         const total = cartTotal(session);
         const deliveryFee = session.deliveryType === 'delivery' && total < FREE_DELIVERY_THRESHOLD ? DELIVERY_CHARGE : 0;
         const grandTotal = total + deliveryFee;
-        let summary = `✅ *Order Summary*\n\n`;
-        session.cart.forEach(item => { summary += `• \${item.name} × \${item.quantity} = Rs \${(item.price * item.quantity).toFixed(2)}\n`; });
-        summary += `\n💰 Subtotal: Rs \${total.toFixed(2)}`;
-        if (deliveryFee > 0) summary += `\n🛵 Delivery: Rs \${deliveryFee.toFixed(2)}`;
-        summary += `\n💵 *Total: Rs \${grandTotal.toFixed(2)}*`;
-        summary += `\n💳 Payment: \${session.paymentMethod}`;
-        summary += `\n📦 \${session.deliveryType === 'delivery' ? '🛵 Delivery to: ' + session.address : '🚗 Pickup from pharmacy'}`;
-        summary += `\n\nType *confirm* to place your order, or add more medicines.`;
+        let summary = '✅ *Order Summary*\n\n';
+        session.cart.forEach(item => { summary += '• ' + item.name + ' × ' + item.quantity + ' = Rs ' + (item.price * item.quantity).toFixed(2) + '\n'; });
+        summary += '\n💰 Subtotal: Rs ' + total.toFixed(2);
+        if (deliveryFee > 0) summary += '\n🛵 Delivery: Rs ' + deliveryFee.toFixed(2);
+        summary += '\n💵 *Total: Rs ' + grandTotal.toFixed(2) + '*';
+        summary += '\n💳 Payment: ' + session.paymentMethod;
+        summary += '\n📦 ' + (session.deliveryType === 'delivery' ? '🛵 Delivery to: ' + session.address : '🚗 Pickup from pharmacy');
+        summary += '\n\nType *confirm* to place your order, or add more medicines.';
         return NextResponse.json({ reply: summary });
       }
       return NextResponse.json({ reply: `Please choose: *Cash*, *Easypaisa*, *JazzCash*, or *Bank Transfer*` });
