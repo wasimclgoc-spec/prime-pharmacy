@@ -234,7 +234,8 @@ export async function POST(req: NextRequest) {
     }
 
     // ── 7. ORDER FIRST: "10 Amoxicillin 500mg" ──────────────────────────
-    const orderMatch = msg.match(/^(\d+)\s+(.+)$/i);
+    // Match patterns: "5 Panadol", "I need 5 Panadol", "give me 5 Panadol", "order 5 Panadol"
+    const orderMatch = msg.match(/(?:^|(?:i\s+(?:need|want|order)\s+|give\s+me\s+|order\s+))(\d+)\s+([a-zA-Z].+)$/i);
     if (orderMatch) {
       const quantity = parseInt(orderMatch[1]);
       const medName = orderMatch[2].trim();
