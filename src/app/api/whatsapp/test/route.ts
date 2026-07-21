@@ -22,7 +22,9 @@ interface TestSession {
 
 const DELIVERY_CHARGE = 20;
 const FREE_DELIVERY_THRESHOLD = 1000;
-const testSessions = new Map<string, TestSession>();
+declare global { var __testSessions: Map<string, TestSession> | undefined; }
+if (!globalThis.__testSessions) globalThis.__testSessions = new Map<string, TestSession>();
+const testSessions = globalThis.__testSessions;
 
 function getSession(userId: string): TestSession {
   let session = testSessions.get(userId);

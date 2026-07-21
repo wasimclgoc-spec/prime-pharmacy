@@ -20,7 +20,10 @@ export interface WhatsAppOrder {
 }
 
 // In-memory store (persists during server lifetime)
-const orderStore: WhatsAppOrder[] = [];
+// Use globalThis to persist orders across Next.js hot reloads & API calls
+declare global { var __whatsappOrderStore: WhatsAppOrder[] | undefined; }
+if (!globalThis.__whatsappOrderStore) globalThis.__whatsappOrderStore = [];
+const orderStore = globalThis.__whatsappOrderStore;
 
 export function createOrder(order: WhatsAppOrder): void {
   orderStore.unshift(order);
