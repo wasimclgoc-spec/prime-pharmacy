@@ -2,13 +2,11 @@ import { NextRequest, NextResponse } from 'next/server';
 import { searchMedicineByName, parseCustomerInfoFromText } from '@/lib/whatsapp-utils';
 import { medicines } from '@/lib/whatsapp-inventory';
 
-// In-memory session for test mode
 interface TestSession {
   name: string;
   address: string;
   phone: string;
   cart: { medicineId: string; name: string; price: number; quantity: number }[];
-  prescriptionUploaded: boolean;
   stage: string;
   lastActivity: number;
 }
@@ -18,206 +16,154 @@ const testSessions = new Map<string, TestSession>();
 function getSession(userId: string): TestSession {
   let session = testSessions.get(userId);
   if (!session) {
-    session = {
-      name: '', address: '', phone: '', cart: [],
-      prescriptionUploaded: false, stage: 'greeting',
-      lastActivity: Date.now()
-    };
+    session = { name: '', address: '', phone: '', cart: [], stage: 'greeting', lastActivity: Date.now() };
     testSessions.set(userId, session);
   }
   session.lastActivity = Date.now();
   return session;
 }
 
-// ── GET: Check configuration status ───────────────────────────────────────
 export async function GET() {
   const token = process.env.WHATSAPP_ACCESS_TOKEN || process.env.META_ACCESS_TOKEN;
   const phoneId = process.env.WHATSAPP_PHONE_NUMBER_ID;
-
   return NextResponse.json({
     configured: !!(token && phoneId),
-    message: token && phoneId
-      ? 'WhatsApp API is configured — messages will be sent via Meta Cloud API'
-      : 'Test mode — API not configured. Messages are processed locally but not sent to WhatsApp.',
-    testNumber: '+1 555-656-3537',
-    webhookUrl: '/api/whatsapp/webhook',
+    message: token && phoneId ? 'WhatsApp API configured' : 'Test mode — no Meta API key',
   });
 }
 
-// ── POST: Simulate WhatsApp message processing ──────────────────────────
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
     const { message, from = 'test-user' } = body;
-
-    if (!message || typeof message !== 'string') {
-      return NextResponse.json({ error: 'Message is required' }, { status: 400 });
-    }
+    if (!message) return NextResponse.json({ error: 'Message required' }, { status: 400 });
 
     const session = getSession(from);
     const msg = message.trim();
 
-    // ── Handle greeting ──
-    const greetingPattern = /^(hi|hello|hey|salam|salaam|start|assalam|good morning|good evening|good afternoon)[\s!.]*$/i;
-    if (greetingPattern.test(msg)) {
-      session.name = '';
-      session.address = '';
-      session.cart = [];
-      session.prescriptionUploaded = false;
-      session.stage = 'greeting';
-
+    // ── 1. GREETING → reset session ──────────────────────────────────────
+    const isGreeting = /^(hi|hello|hey|salam|salaam|start|assalam|good morning|good evening|good afternoon)[\s!.]*$/i.test(msg);
+    if (isGreeting) {
+      Object.assign(session, { name: '', address: '', phone: '', cart: [], stage: 'greeting' });
       return NextResponse.json({
-        reply: `👋 Welcome to Prime Pharmacy!\n\nI can help you with:\n💊 Search medicines (e.g. "Panadol 500mg")\n📷 Upload prescription\n📦 Place orders\n\nHow can I help you today?`
+        reply: `👋 Welcome to Prime Pharmacy!\n\nI can help you with:\n💊 Search medicines by name\n🛒 Place orders (type quantity + name, e.g. "2 Panadol 500mg")\n📦 Track your orders\n\nHow can I help you today?`
       });
     }
 
-    // ── Handle image/prescription upload ──
-    if (msg.includes('[IMAGE_RECEIVED]') || msg.toLowerCase().includes('upload') || msg.toLowerCase().includes('prescription')) {
-      if (msg.includes('[IMAGE_RECEIVED]') || msg.toLowerCase().includes('image')) {
-        session.prescriptionUploaded = true;
-        return NextResponse.json({
-          reply: `✅ Prescription received!\n\nOur pharmacist will review it shortly.\n\nNow, please tell me:\n1. Your full name\n2. Your mobile number\n3. Your delivery address\n\nYou can send all in one message.\nExample: "Ahmed 0300 1234567 Gulberg Lahore"`
-        });
-      }
+    // ── 2. IMAGE → mark prescription received ───────────────────────────
+    if (msg.includes('[IMAGE_RECEIVED]')) {
+      return NextResponse.json({ reply: `✅ Prescription received! Our pharmacist will review it.\n\nNow search for your medicines or place an order.` });
     }
 
-    // ── Search medicine ──
-    const isPersonalInfo = /(?:\+92|\+966|0)[0-9\s\-]{8,13}/.test(msg) ||
-      /street|block|sector|road|avenue|district|area|colony|town|gulberg|johar|allama/i.test(msg);
-
-    const medResults = searchMedicineByName(msg, medicines);
-
-    if (medResults.length > 0 && !isPersonalInfo) {
-      let response = `💊 Found ${medResults.length} medicine(s):\n\n`;
-      medResults.forEach((med, i) => {
-        response += `${i + 1}. ${med.name}\n`;
-        response += `   💰 Price: Rs ${med.price.toFixed(2)}\n`;
-        response += `   📦 Stock: ${med.stock} units\n`;
-        response += `   🏷️ Brand: ${med.brand} | Generic: ${med.generic}\n`;
-        response += `   ${med.prescriptionRequired ? '⚠️ Rx Medicine' : '✅ OTC (No prescription)'}\n\n`;
-      });
-      response += `To order, type quantity + medicine name.\nExample: "2 ${medResults[0].name}"`;
-
-      return NextResponse.json({ reply: response });
-    }
-
-    // ── Collect customer info ──
-    const extracted = parseCustomerInfoFromText(msg);
-
-    if (extracted.name || extracted.address) {
-      if (extracted.name) session.name = extracted.name;
-      if (extracted.address) session.address = extracted.address;
-      session.phone = extracted.phone || from;
-
-      const hasName = session.name.length > 0;
-      const hasAddress = session.address.length > 0;
-
-      if (hasName && hasAddress) {
-        session.stage = 'ready_to_order';
-        return NextResponse.json({
-          reply: `✅ Got it, ${session.name}!\n\nHere's what I have:\n👤 Name: ${session.name}\n📱 Phone: ${session.phone}\n📍 Address: ${session.address}\n\nNow you can:\n💊 Search medicines by name\n📷 Upload your prescription\n\nWhat would you like to do?`
-        });
-      } else {
-        const missing = [];
-        if (!hasName) missing.push('Full Name');
-        if (!hasAddress) missing.push('Delivery Address');
-        return NextResponse.json({
-          reply: `Almost there! I still need your ${missing.join(' and ')}.\n\nPlease send them in one message.`
-        });
-      }
-    }
-
-    // ── Add to cart (e.g. "2 Panadol 500mg") ──
+    // ── 3. ORDER FIRST: "10 Amoxicillin 500mg" ──────────────────────────
     const orderMatch = msg.match(/^(\d+)\s+(.+)$/i);
     if (orderMatch) {
       const quantity = parseInt(orderMatch[1]);
-      const medName = orderMatch[2];
+      const medName = orderMatch[2].trim();
       const results = searchMedicineByName(medName, medicines);
 
       if (results.length > 0) {
         const med = results[0];
-        session.cart.push({
-          medicineId: med.id,
-          name: med.name,
-          price: med.price,
-          quantity,
-        });
-
-        const cartTotal = session.cart.reduce((sum, item) => sum + (item.price * item.quantity), 0);
+        session.cart.push({ medicineId: med.id, name: med.name, price: med.price, quantity });
+        const cartTotal = session.cart.reduce((s, i) => s + i.price * i.quantity, 0);
         session.stage = 'ordering';
-
         const needsInfo = !session.name || !session.address;
         return NextResponse.json({
-          reply: `✅ Added to cart:\n${med.name} × ${quantity} = Rs ${(med.price * quantity).toFixed(2)}\n\n🛒 Cart Total: Rs ${cartTotal.toFixed(2)}\n\n${needsInfo ? 'To checkout, send your name and address.\nExample: "Ahmed 03001234567 Gulberg Lahore"\n\nOr add more medicines by typing name.' : 'Type "confirm order" to checkout, or add more medicines.'}`
+          reply: `✅ Added to cart:\n*${med.name}* × ${quantity} = Rs ${(med.price * quantity).toFixed(2)}\n\n🛒 *Cart Total: Rs ${cartTotal.toFixed(2)}*\n\n${
+            needsInfo
+              ? 'To confirm order, send your name and address:\nExample: "Ahmed 03001234567 Gulberg Lahore"'
+              : 'Type "confirm order" to checkout, or add more medicines.'
+          }`
         });
       }
     }
 
-    // ── Confirm order ──
-    if (/confirm|place order|order karo|order karein/i.test(msg) && session.cart.length > 0) {
-      // Prescription is optional — place order directly
-      const orderNumber = 'ORD-' + Math.floor(10000 + Math.random() * 90000);
-      const total = session.cart.reduce((sum, item) => sum + (item.price * item.quantity), 0);
-
-      let orderSummary = `✅ Order Confirmed!\n\n`;
-      orderSummary += `Order #: ${orderNumber}\n\n`;
-      orderSummary += `Items:\n`;
+    // ── 4. CONFIRM ORDER ─────────────────────────────────────────────────
+    if (/confirm|place order/i.test(msg) && session.cart.length > 0) {
+      if (!session.name || !session.address) {
+        return NextResponse.json({ reply: `Please send your name and delivery address first.\nExample: "Ahmed 03001234567 Gulberg Lahore"` });
+      }
+      const orderNum = 'ORD-' + Math.floor(10000 + Math.random() * 90000);
+      const total = session.cart.reduce((s, i) => s + i.price * i.quantity, 0);
+      let summary = `✅ *Order Confirmed!*\n\nOrder #: *${orderNum}*\n\nItems:\n`;
       session.cart.forEach((item, i) => {
-        orderSummary += `${i + 1}. ${item.name} × ${item.quantity} = Rs ${(item.price * item.quantity).toFixed(2)}\n`;
+        summary += `${i + 1}. ${item.name} × ${item.quantity} = Rs ${(item.price * item.quantity).toFixed(2)}\n`;
       });
-      orderSummary += `\nTotal: Rs ${total.toFixed(2)}\n`;
-      orderSummary += `\nCustomer: ${session.name}\n`;
-      orderSummary += `Phone: ${session.phone}\n`;
-      orderSummary += `Address: ${session.address}\n`;
-      orderSummary += `Payment: Cash on Delivery\n`;
-      orderSummary += `Status: Pending\n\n`;
-      orderSummary += `You can track your order using order number ${orderNumber}`;
-
+      summary += `\n*Total: Rs ${total.toFixed(2)}*\nCustomer: ${session.name}\nPhone: ${session.phone || from}\nAddress: ${session.address}\nPayment: Cash on Delivery\n\nTrack with order number: ${orderNum}`;
       session.cart = [];
       session.stage = 'ready_to_order';
-
-      return NextResponse.json({ reply: orderSummary });
+      return NextResponse.json({ reply: summary });
     }
 
-    // ── Default: Use OpenRouter AI ──
-    const apiKey = process.env.OPENROUTER_API_KEY || process.env.NEXT_PUBLIC_OPENROUTER_API_KEY || '';
+    // ── 5. CUSTOMER INFO: name + phone + address ─────────────────────────
+    const extracted = parseCustomerInfoFromText(msg);
+    if (extracted.name || extracted.address) {
+      if (extracted.name) session.name = extracted.name;
+      if (extracted.address) session.address = extracted.address;
+      if (extracted.phone) session.phone = extracted.phone;
 
-    if (!apiKey) {
-      return NextResponse.json({
-        reply: `I can help you with:\n\n💊 Search medicines (e.g. "Panadol 500mg")\n📷 Upload prescription\n📦 Place orders\n\nWhat would you like to do?`
+      if (session.name && session.address) {
+        session.stage = 'ready_to_order';
+        const hasCart = session.cart.length > 0;
+        return NextResponse.json({
+          reply: `✅ Got it, *${session.name}*!\n\n👤 Name: ${session.name}\n📍 Address: ${session.address}\n\n${
+            hasCart
+              ? `🛒 You have items in cart. Type "confirm order" to checkout.`
+              : `Now search for medicines or type "2 Panadol 500mg" to add to cart.`
+          }`
+        });
+      } else {
+        const missing = [];
+        if (!session.name) missing.push('Full Name');
+        if (!session.address) missing.push('Delivery Address');
+        return NextResponse.json({ reply: `Still need your ${missing.join(' and ')}. Please send in one message.` });
+      }
+    }
+
+    // ── 6. MEDICINE SEARCH ───────────────────────────────────────────────
+    const medResults = searchMedicineByName(msg, medicines);
+    if (medResults.length > 0) {
+      let response = `💊 Found *${medResults.length}* medicine(s):\n\n`;
+      medResults.forEach((med, i) => {
+        response += `${i + 1}. *${med.name}*\n`;
+        response += `   💰 Rs ${med.price.toFixed(2)} | 📦 Stock: ${med.stock}\n`;
+        response += `   🏷️ ${med.brand} | ${med.generic}\n`;
+        response += `   ${med.prescriptionRequired ? '⚠️ Rx Medicine' : '✅ OTC'}\n\n`;
       });
+      response += `To order, type quantity + name\nExample: "*2 ${medResults[0].name}*"`;
+      return NextResponse.json({ reply: response });
     }
 
-    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-        'HTTP-Referer': 'https://prime-pharmacy.vercel.app',
-        'X-Title': 'Prime Pharmacy WhatsApp',
-      },
-      body: JSON.stringify({
-        model: 'google/gemini-2.0-flash-exp:free',
-        messages: [
-          {
-            role: 'system',
-            content: `You are Prime Pharmacy AI Assistant on WhatsApp. Keep responses short (max 3 lines). Available medicines: ${medicines.map(m => m.name + ' (Rs ' + m.price.toFixed(2) + ')').join(', ')}. Customer: ${session.name || 'unknown'}. Help with medicine search, orders, prescriptions.`
-          },
-          { role: 'user', content: msg }
-        ],
-        max_tokens: 200,
-      }),
+    // ── 7. AI FALLBACK ───────────────────────────────────────────────────
+    const apiKey = process.env.OPENROUTER_API_KEY || process.env.NEXT_PUBLIC_OPENROUTER_API_KEY || '';
+    if (apiKey) {
+      const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': 'https://prime-pharmacy.vercel.app',
+        },
+        body: JSON.stringify({
+          model: 'google/gemini-2.0-flash-exp:free',
+          messages: [
+            { role: 'system', content: `You are Prime Pharmacy WhatsApp bot. Keep replies under 3 lines. Help with medicines and orders. Customer: ${session.name || 'unknown'}.` },
+            { role: 'user', content: msg }
+          ],
+          max_tokens: 150,
+        }),
+      });
+      const data = await res.json();
+      const reply = data.choices?.[0]?.message?.content;
+      if (reply) return NextResponse.json({ reply });
+    }
+
+    return NextResponse.json({
+      reply: `I can help you with:\n💊 Search medicines by name\n🛒 Order: type "2 Panadol 500mg"\n📦 Track orders\n\nWhat would you like?`
     });
-
-    const data = await response.json();
-    const aiReply = data.choices?.[0]?.message?.content || 'Sorry, I did not understand. Try searching a medicine by name.';
-
-    return NextResponse.json({ reply: aiReply });
 
   } catch (error) {
-    console.error('Test WhatsApp handler error:', error);
-    return NextResponse.json({
-      reply: 'Sorry, something went wrong. Try again.'
-    });
+    console.error('WhatsApp test error:', error);
+    return NextResponse.json({ reply: 'Something went wrong. Please try again.' });
   }
 }

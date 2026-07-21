@@ -79,6 +79,33 @@ export async function handleWhatsAppMessage(
     return;
   }
 
+  // ── Order check FIRST: "10 Amoxicillin 500mg" pattern ──
+  const orderMatch = message.match(/^(\d+)\s+(.+)$/i);
+  if (orderMatch) {
+    const quantity = parseInt(orderMatch[1]);
+    const medName = orderMatch[2];
+    const results = searchMedicineByName(medName, medicines);
+
+    if (results.length > 0) {
+      const med = results[0];
+      session.cart.push({
+        medicineId: med.id,
+        name: med.name,
+        price: med.price,
+        quantity,
+      });
+
+      const cartTotal = session.cart.reduce((sum, item) => sum + (item.price * item.quantity), 0);
+      session.stage = 'ordering';
+
+      const needsInfo = !session.name || !session.address;
+      await sendWhatsAppText(from, phoneNumberId,
+        `✅ Added to cart:\n${med.name} × ${quantity} = Rs ${(med.price * quantity).toFixed(2)}\n\n🛒 Cart Total: Rs ${cartTotal.toFixed(2)}\n\n${needsInfo ? 'To confirm order, please send your name and delivery address.\nExample: "Ahmed 03001234567 Gulberg Lahore"' : 'Type "confirm order" to checkout, or add more medicines.'}`
+      );
+      return;
+    }
+  }
+
   // ── Check if customer is searching for a medicine ──
   const medResults = searchMedicineByName(message, medicines);
   if (medResults.length > 0 && !isPersonalInfo(message)) {
@@ -120,31 +147,6 @@ export async function handleWhatsAppMessage(
         `Almost there! I still need your *${missing.join(' and ')}*.\n\nPlease send them in one message.`
       );
       session.stage = 'collecting_info';
-      return;
-    }
-  }
-
-  // ── Handle order intent (medicine name + quantity) ──
-  const orderMatch = message.match(/^(\d+)\s+(.+)$/i);
-  if (orderMatch && (session.stage === 'ready_to_order' || session.stage === 'ordering' || session.stage === 'greeting' || session.stage === 'collecting_info')) {
-    const quantity = parseInt(orderMatch[1]);
-    const medName = orderMatch[2];
-    const results = searchMedicineByName(medName, medicines);
-
-    if (results.length > 0) {
-      const med = results[0];
-      session.cart.push({
-        medicineId: med.id,
-        name: med.name,
-        price: med.price,
-        quantity,
-      });
-
-      const cartTotal = session.cart.reduce((sum, item) => sum + (item.price * item.quantity), 0);
-      await sendWhatsAppText(from, phoneNumberId,
-        `✅ Added to cart:\n${med.name} × ${quantity} = Rs ${(med.price * quantity).toFixed(2)}\n\n🛒 Cart Total: Rs ${cartTotal.toFixed(2)}\n\nType "confirm order" to place your order, or search for more medicines.`
-      );
-      session.stage = 'ordering';
       return;
     }
   }
